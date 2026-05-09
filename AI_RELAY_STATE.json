@@ -1,0 +1,17 @@
+{
+  "task_id": "required-files-validation",
+  "issue_number": null,
+  "pr_number": null,
+  "current_agent": "codex",
+  "next_agent": "claude",
+  "status": "READY_FOR_HANDOFF",
+  "round": 0,
+  "self_fix_count": 0,
+  "receiver_reject_count": 0,
+  "max_rounds": 3,
+  "max_self_fix": 2,
+  "max_receiver_reject": 1,
+  "last_test_status": "passed",
+  "handoff_status": "PASS",
+  "requires_human": false
+}
