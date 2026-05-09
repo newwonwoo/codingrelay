@@ -56,3 +56,8 @@
 ### Not Verified
 - Live GitHub Actions `workflow_dispatch` execution from the GitHub UI/API.
 - Pull request check execution after pushing to a remote branch.
+
+## 2026-05-09 Workflow Trigger Fix
+
+### Results
+- workflow_run removed because no target workflow exists.
