@@ -70,6 +70,13 @@ def test_format_status_response_matches_requested_shape() -> None:
     )
 
 
+def test_status_command_requires_exact_comment_body() -> None:
+    assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay status"}}) is True
+    assert ai_relay_harness.is_relay_status_comment({"comment": {"body": " /relay status"}}) is False
+    assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay status "}}) is False
+    assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay start"}}) is False
+
+
 def test_handle_issue_comment_event_posts_status_to_issue_number(tmp_path: Path) -> None:
     event_path = write_event(tmp_path, "/relay status", issue_number=42)
     posted_comments: list[tuple[str, int, str, str]] = []
