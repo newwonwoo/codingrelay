@@ -1,0 +1,17 @@
+{
+  "task_id": "",
+  "issue_number": null,
+  "pr_number": null,
+  "current_agent": "claude",
+  "next_agent": "codex",
+  "status": "READY",
+  "round": 0,
+  "self_fix_count": 0,
+  "receiver_reject_count": 0,
+  "max_rounds": 3,
+  "max_self_fix": 2,
+  "max_receiver_reject": 1,
+  "last_test_status": "unknown",
+  "handoff_status": "unknown",
+  "requires_human": false
+}
