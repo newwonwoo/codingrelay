@@ -1,178 +1,187 @@
 #!/usr/bin/env python3
-"""Minimal V1 AI Relay GitHub Actions harness.
-
-Phase 1 intentionally validates repository relay files and writes an Actions
-summary. Command parsing, comment posting, full state transitions, and Kakao
-sending are later MVP phases described in docs/ai-relay-v1-implementation-plan.md.
-"""
+"""Respond to AI relay status commands from GitHub issue comments."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping, Sequence
+from urllib import request
 
-REQUIRED_FILES = [
-    "AI_RELAY_CONTRACT.md",
-    "AI_RELAY_STATE.json",
-    "AI_BATON.md",
-    "AI_EVIDENCE.md",
-    "AI_RISKS.md",
-]
+STATUS_COMMAND = "/relay status"
+STATE_FILE = "AI_RELAY_STATE.json"
 
-REQUIRED_BATON_SECTIONS = [
-    "Task Goal",
-    "Current Agent",
-    "Next Agent",
-    "Work Completed",
-    "Changed Files",
-    "Decision Reasons",
-    "Evidence",
-    "Known Risks",
-    "Six-Month Failure Risks",
-    "Receiver Compatibility Risks",
-    "Do Not Touch",
-    "Next Actions",
-    "Handoff Status",
-]
-
-VALID_AGENTS = {"claude", "codex"}
-VALID_STATUSES = {
-    "READY",
-    "WORKING",
-    "SELF_VERIFYING",
-    "NEEDS_SELF_FIX",
-    "EVIDENCE_CHECKING",
-    "READY_FOR_HANDOFF",
-    "RECEIVER_REVIEWING",
-    "ACCEPTED_BY_RECEIVER",
-    "REJECTED_BY_RECEIVER",
-    "WORKING_BY_NEXT_AGENT",
-    "BLOCKED",
-    "DONE",
-    "HUMAN_REQUIRED",
+DEFAULT_RELAY_STATE: dict[str, Any] = {
+    "status": "READY",
+    "current_agent": "none",
+    "next_agent": "none",
+    "round": 0,
+    "requires_human": False,
 }
 
 
-def load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    return data
+class RelayHarnessError(RuntimeError):
+    """Raised when the relay harness cannot process a status request."""
 
 
-def read_event(path: Path | None) -> dict[str, Any]:
-    if path is None or not path.exists():
-        return {}
-    return load_json(path)
+def load_relay_state(repo_root: Path | str) -> dict[str, Any]:
+    """Read AI_RELAY_STATE.json, or return the default READY state if absent."""
+    state_path = Path(repo_root) / STATE_FILE
+    if not state_path.is_file():
+        return dict(DEFAULT_RELAY_STATE)
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise RelayHarnessError(f"{STATE_FILE} must contain a JSON object.")
+    return {**DEFAULT_RELAY_STATE, **state}
 
 
-def check_required_files(root: Path) -> list[str]:
-    missing = [name for name in REQUIRED_FILES if not (root / name).is_file()]
-    return [f"Missing required file: {name}" for name in missing]
+def format_status_value(value: Any) -> str:
+    """Format values for stable status comments."""
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
 
 
-def check_state(state: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-    current_agent = state.get("current_agent")
-    next_agent = state.get("next_agent")
-    status = state.get("status")
-
-    if current_agent not in VALID_AGENTS:
-        errors.append("AI_RELAY_STATE.json has invalid current_agent")
-    if next_agent not in VALID_AGENTS:
-        errors.append("AI_RELAY_STATE.json has invalid next_agent")
-    if current_agent == next_agent:
-        errors.append("AI_RELAY_STATE.json current_agent and next_agent must differ")
-    if status not in VALID_STATUSES:
-        errors.append("AI_RELAY_STATE.json has invalid status")
-
-    for key in ("round", "self_fix_count", "receiver_reject_count", "max_rounds", "max_self_fix", "max_receiver_reject"):
-        if not isinstance(state.get(key), int):
-            errors.append(f"AI_RELAY_STATE.json {key} must be an integer")
-
-    if not isinstance(state.get("requires_human"), bool):
-        errors.append("AI_RELAY_STATE.json requires_human must be a boolean")
-
-    return errors
+def format_status_response(state: Mapping[str, Any]) -> str:
+    """Format the relay status response body."""
+    merged_state = {**DEFAULT_RELAY_STATE, **state}
+    return "\n".join(
+        [
+            "[AI Relay Status]",
+            f"status: {merged_state['status']}",
+            f"current_agent: {merged_state['current_agent']}",
+            f"next_agent: {merged_state['next_agent']}",
+            f"round: {merged_state['round']}",
+            f"requires_human: {format_status_value(merged_state['requires_human'])}",
+        ]
+    )
 
 
-def check_baton(root: Path) -> list[str]:
-    baton = (root / "AI_BATON.md").read_text(encoding="utf-8")
-    missing = [section for section in REQUIRED_BATON_SECTIONS if f"## {section}" not in baton]
-    return [f"AI_BATON.md missing section: {section}" for section in missing]
+def load_github_event(event_path: Path | str) -> dict[str, Any]:
+    """Load a GitHub Actions event payload."""
+    event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+    if not isinstance(event, dict):
+        raise RelayHarnessError("GitHub event payload must contain a JSON object.")
+    return event
 
 
-def infer_event_target(event: dict[str, Any]) -> str:
-    if "issue" in event:
-        issue = event["issue"]
-        if isinstance(issue, dict) and "number" in issue:
-            return f"issue #{issue['number']}"
-    if "pull_request" in event:
-        pull_request = event["pull_request"]
-        if isinstance(pull_request, dict) and "number" in pull_request:
-            return f"pull request #{pull_request['number']}"
-    return "repository"
+def is_relay_status_comment(event: Mapping[str, Any]) -> bool:
+    """Return True only when the comment body exactly matches /relay status."""
+    comment = event.get("comment")
+    if not isinstance(comment, Mapping):
+        return False
+    return comment.get("body") == STATUS_COMMAND
 
 
-def render_summary(event_name: str, event_target: str, state: dict[str, Any], errors: list[str]) -> str:
-    lines = [
-        "# AI Relay Harness",
-        "",
-        f"- Event: `{event_name}`",
-        f"- Target: {event_target}",
-        f"- Status: `{state.get('status', 'unknown')}`",
-        f"- Current Agent: `{state.get('current_agent', 'unknown')}`",
-        f"- Next Agent: `{state.get('next_agent', 'unknown')}`",
-        f"- Handoff Status: `{state.get('handoff_status', 'unknown')}`",
-        "",
-    ]
-
-    if errors:
-        lines.append("## Validation Errors")
-        lines.extend(f"- {error}" for error in errors)
-    else:
-        lines.append("## Validation")
-        lines.append("- Relay skeleton validation passed.")
-        lines.append("- Phase 1 harness did not post comments or send Kakao notifications.")
-
-    lines.append("")
-    return "\n".join(lines)
+def get_issue_number(event: Mapping[str, Any]) -> int:
+    """Return the issue number shared by Issue and PR comment threads."""
+    issue = event.get("issue")
+    if not isinstance(issue, Mapping) or "number" not in issue:
+        raise RelayHarnessError("Missing issue number in GitHub event payload.")
+    return int(issue["number"])
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the minimal AI Relay V1 harness.")
-    parser.add_argument("--repo-root", default=".", help="Repository root path.")
-    parser.add_argument("--event-name", default="workflow_dispatch", help="GitHub event name.")
-    parser.add_argument("--event-path", default=None, help="Path to GitHub event payload JSON.")
-    parser.add_argument("--summary", default=None, help="Path to GitHub step summary file.")
-    args = parser.parse_args()
+def post_issue_comment(
+    repository: str,
+    issue_number: int,
+    body: str,
+    token: str,
+    api_url: str = "https://api.github.com",
+) -> None:
+    """Post a GitHub Issue/PR thread comment using GITHUB_TOKEN."""
+    url = f"{api_url.rstrip('/')}/repos/{repository}/issues/{issue_number}/comments"
+    payload = json.dumps({"body": body}).encode("utf-8")
+    github_request = request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with request.urlopen(github_request) as response:
+        response.read()
 
-    root = Path(args.repo_root).resolve()
-    event = read_event(Path(args.event_path) if args.event_path else None)
 
-    errors = check_required_files(root)
-    state: dict[str, Any] = {}
-    if not errors:
-        try:
-            state = load_json(root / "AI_RELAY_STATE.json")
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            errors.append(f"Unable to load AI_RELAY_STATE.json: {exc}")
+def handle_issue_comment_event(
+    repo_root: Path | str,
+    event_path: Path | str,
+    repository: str,
+    token: str,
+    post_comment: Callable[[str, int, str, str], None] = post_issue_comment,
+) -> bool:
+    """Post relay status for an exact /relay status issue_comment event.
 
-    if state:
-        errors.extend(check_state(state))
+    Returns False for all other comments. `/relay start` is intentionally not
+    implemented in V1.
+    """
+    event = load_github_event(event_path)
+    if not is_relay_status_comment(event):
+        return False
 
-    if (root / "AI_BATON.md").is_file():
-        errors.extend(check_baton(root))
+    issue_number = get_issue_number(event)
+    state = load_relay_state(repo_root)
+    post_comment(repository, issue_number, format_status_response(state), token)
+    return True
 
-    summary = render_summary(args.event_name, infer_event_target(event), state, errors)
-    if args.summary:
-        Path(args.summary).write_text(summary, encoding="utf-8")
-    print(summary)
 
-    return 1 if errors else 0
+def main(argv: Sequence[str] | None = None) -> int:
+    """Handle the current GitHub issue_comment event."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "repo_root",
+        nargs="?",
+        default=Path.cwd(),
+        type=Path,
+        help="Repository root containing AI_RELAY_STATE.json. Defaults to the current directory.",
+    )
+    parser.add_argument(
+        "--event-path",
+        default=os.environ.get("GITHUB_EVENT_PATH"),
+        type=Path,
+        help="Path to the GitHub event payload. Defaults to GITHUB_EVENT_PATH.",
+    )
+    parser.add_argument(
+        "--repository",
+        default=os.environ.get("GITHUB_REPOSITORY"),
+        help="GitHub owner/repo. Defaults to GITHUB_REPOSITORY.",
+    )
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("GITHUB_TOKEN"),
+        help="GitHub token used to post status comments. Defaults to GITHUB_TOKEN.",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        if args.event_path is None:
+            raise RelayHarnessError("GITHUB_EVENT_PATH is required.")
+
+        event = load_github_event(args.event_path)
+        if not is_relay_status_comment(event):
+            print("No /relay status command found.")
+            return 0
+
+        if not args.repository:
+            raise RelayHarnessError("GITHUB_REPOSITORY is required.")
+        if not args.token:
+            raise RelayHarnessError("GITHUB_TOKEN is required.")
+
+        issue_number = get_issue_number(event)
+        state = load_relay_state(args.repo_root)
+        post_issue_comment(args.repository, issue_number, format_status_response(state), args.token)
+    except (OSError, json.JSONDecodeError, RelayHarnessError) as exc:
+        print(str(exc))
+        return 1
+
+    print("AI relay status comment posted.")
+    return 0
 
 
 if __name__ == "__main__":
