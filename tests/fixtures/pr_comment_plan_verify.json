@@ -1,0 +1,11 @@
+{
+  "issue": {
+    "number": 108,
+    "pull_request": {
+      "url": "https://api.github.com/repos/owner/repo/pulls/108"
+    }
+  },
+  "comment": {
+    "body": "/relay verify"
+  }
+}

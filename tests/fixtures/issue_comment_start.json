@@ -1,0 +1,8 @@
+{
+  "issue": {
+    "number": 42
+  },
+  "comment": {
+    "body": "/relay start\nstart_agent: claude\nnext_agent: codex\ngoal: local relay dry-run"
+  }
+}
