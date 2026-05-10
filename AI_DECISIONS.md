@@ -18,6 +18,12 @@
 - Reason: The requested boundary is automatic-call-preparation, not actual agent invocation.
 - Consequence: Humans can review/copy the generated dispatch prompt before any later automation step adds live mentions.
 
+## 2026-05-10 — Stage 7: Isolate kakao_notify Failures From Workflow Exit Code
+
+- Decision: `kakao_notify` swallows all delivery exceptions and returns `False` instead of propagating. The HUMAN_REQUIRED branch already posts the GitHub comment before calling `kakao_notify`, so isolating the network failure preserves the relay state on GitHub while preventing a red workflow run from a transient kakao outage.
+- Reason: A red workflow run after relay state was successfully persisted is a false positive that erodes trust in the relay status check. The kakao notification is best-effort by design (V1 boundary — "live kakao delivery is opt-in, secret-backed").
+- Consequence: Operators who treat a red Actions run as the canary for "human attention needed" must instead read the `[AI Relay 사람 판단 필요]` GitHub comment. Stderr logs from a failed `kakao_notify` are visible in the Actions run logs for debugging.
+
 ## 2026-05-10 — Stage 6: Land Risks 7-10 Fixes In One Round
 
 - Decision: Implement all four deferred risks (network retry, hidden-state hijack guard, DONE→start continuity, code-block marker collision) in a single round with their tests, since the prototype is still pre-formal.

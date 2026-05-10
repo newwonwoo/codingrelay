@@ -1286,6 +1286,110 @@ def test_main_posts_error_comment_when_relay_harness_error_raised(tmp_path: Path
     assert "network exploded" in body
 
 
+def test_kakao_notify_skips_silently_without_webhook(capsys) -> None:
+    sent: list[tuple[str, bytes]] = []
+
+    def sender(url: str, body: bytes) -> None:
+        sent.append((url, body))
+
+    result = ai_relay_harness.kakao_notify("hi", webhook_url=None, sender=sender)
+    assert result is False
+    assert sent == []
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_kakao_notify_returns_true_on_successful_send() -> None:
+    sent: list[tuple[str, bytes]] = []
+
+    def sender(url: str, body: bytes) -> None:
+        sent.append((url, body))
+
+    result = ai_relay_harness.kakao_notify(
+        "ping",
+        webhook_url="https://kakao.example/hook",
+        sender=sender,
+    )
+    assert result is True
+    assert len(sent) == 1
+    assert sent[0][0] == "https://kakao.example/hook"
+    assert b"ping" in sent[0][1]
+
+
+def test_kakao_notify_returns_false_and_logs_on_url_error(capsys) -> None:
+    from urllib.error import URLError
+
+    def boom(url: str, body: bytes) -> None:
+        raise URLError("kakao-down")
+
+    result = ai_relay_harness.kakao_notify(
+        "alert",
+        webhook_url="https://kakao.example/hook",
+        sender=boom,
+    )
+    assert result is False
+    captured = capsys.readouterr()
+    assert "kakao_notify delivery failed" in captured.err
+    assert "kakao-down" in captured.err
+
+
+def test_kakao_notify_swallows_unexpected_errors(capsys) -> None:
+    def weird(url: str, body: bytes) -> None:
+        raise RuntimeError("nope")
+
+    result = ai_relay_harness.kakao_notify(
+        "alert",
+        webhook_url="https://kakao.example/hook",
+        sender=weird,
+    )
+    assert result is False
+    captured = capsys.readouterr()
+    assert "kakao_notify unexpected error" in captured.err
+    assert "nope" in captured.err
+
+
+def test_human_required_branch_returns_true_even_when_kakao_fails(tmp_path: Path, monkeypatch) -> None:
+    """The relay state must be persisted to GitHub even if kakao is unreachable."""
+    from urllib.error import URLError
+
+    locked_state = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "WORKING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 99,
+            "max_rounds": 3,
+            "requires_human": False,
+        }
+    )
+    thread = CommentThread()
+    thread.comments.append({"id": 1, "body": locked_state})
+
+    monkeypatch.setenv("KAKAO_WEBHOOK_URL", "https://kakao.example/hook")
+
+    real_urlopen = ai_relay_harness.request.urlopen
+
+    def fake_urlopen(req, *a, **kw):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "kakao.example" in url:
+            raise URLError("kakao-down")
+        return real_urlopen(req, *a, **kw)
+
+    monkeypatch.setattr(ai_relay_harness.request, "urlopen", fake_urlopen)
+
+    event_path = write_event(tmp_path, "/relay handoff", issue_number=42)
+    posted = ai_relay_harness.handle_issue_comment_event(
+        tmp_path,
+        event_path,
+        "owner/repo",
+        "token",
+        post_comment=thread.post_comment,
+        list_comments=thread.list_comments,
+    )
+    assert posted is True
+    assert "[AI Relay 사람 판단 필요" in thread.last_body or "HUMAN_REQUIRED" in thread.last_body
+
+
 def test_workflow_pull_request_test_gate_runs_pytest() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ai-relay-tests.yml").read_text(encoding="utf-8")
 

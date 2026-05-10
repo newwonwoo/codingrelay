@@ -118,6 +118,18 @@
   `<!-- AI_RELAY_PLAN`) without a migration path; old comments must remain
   parseable.
 
+## Stage 7 Addendum (Risk 11 landed)
+
+- `kakao_notify` now wraps both the injectable `sender` path and the
+  real `urlopen` path in try/except. `HTTPError`, `URLError`, `OSError`,
+  and any unexpected exception are caught, logged to stderr with the
+  `[AI Relay] kakao_notify ...` prefix, and the function returns `False`.
+- HUMAN_REQUIRED branch unchanged at the call site — it already ignored
+  the return value, so isolating the failure required no caller changes.
+- Test count: 85 passing (80 + 5 new for Risk 11).
+- All four originally-deferred risks (7-10) and the newly discovered
+  Risk 11 are now closed. AI_RISKS.md has zero open items.
+
 ## Stage 6 Addendum (Risks 7-10 landed)
 
 - `github_api_request` retries on URLError, HTTP 429, and HTTP 5xx with

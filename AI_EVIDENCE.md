@@ -87,6 +87,30 @@
 ### Not Verified
 - Live GitHub comment creation for `/relay plan` or `/relay dispatch` after pushing to GitHub.
 
+## 2026-05-10 Stage 7: Risk 11 Fix (Kakao Failure Isolation)
+
+### Commands Run
+- `python3 -m py_compile .github/scripts/ai_relay_harness.py`
+- `python3 -m pytest -q`
+
+### Results
+- `kakao_notify` now catches `HTTPError`, `URLError`, `OSError`, and any unexpected exception, logs to stderr with an `[AI Relay] kakao_notify ...` prefix, and returns `False`. Successful sends still return `True`.
+- HUMAN_REQUIRED branch still posts the GitHub comment first and is unaffected by kakao failure.
+- 5 new tests cover: silent skip without webhook, success on injected sender, URLError → return False + stderr log, RuntimeError → return False + stderr log, end-to-end HUMAN_REQUIRED returning True with a posted GitHub comment when kakao raises URLError.
+- Pytest cumulative: 80 → 85. Final run: `85 passed in 0.38s`.
+
+### Failed Tests
+- None.
+
+### Logs
+- `85 passed in 0.38s`
+
+### Screenshots / Runtime Evidence
+- Not applicable for stdlib-only Python harness.
+
+### Not Verified
+- Live kakao webhook delivery (no webhook secret in this environment).
+
 ## 2026-05-10 Stage 6: Risks 7-10 Fixes
 
 ### Commands Run

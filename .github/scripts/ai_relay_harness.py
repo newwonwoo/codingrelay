@@ -1233,25 +1233,38 @@ def kakao_notify(
 ) -> bool:
     """Send a kakao notification when a webhook is configured; silent no-op otherwise.
 
-    Returns True when a real send is attempted, False when skipped (no webhook).
-    `sender(url, payload_bytes)` is injectable for tests so we never hit the
-    network from the test suite.
+    Returns True when the send was attempted and succeeded, False when skipped
+    (no webhook) or when delivery failed. Network/sender errors are caught
+    and logged to stderr so a temporary kakao outage does not turn the
+    GitHub Actions run red after the relay state was already persisted
+    (Risk 11). `sender(url, payload_bytes)` is injectable for tests so we
+    never hit the network from the test suite.
     """
+    import sys
+    from urllib.error import HTTPError, URLError
+
     if not webhook_url:
         return False
     payload = json.dumps({"text": message}, ensure_ascii=False).encode("utf-8")
-    if sender is not None:
-        sender(webhook_url, payload)
+    try:
+        if sender is not None:
+            sender(webhook_url, payload)
+            return True
+        notify_request = request.Request(
+            webhook_url,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with request.urlopen(notify_request) as _:
+            pass
         return True
-    notify_request = request.Request(
-        webhook_url,
-        data=payload,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with request.urlopen(notify_request) as _:
-        pass
-    return True
+    except (HTTPError, URLError, OSError) as exc:
+        print(f"[AI Relay] kakao_notify delivery failed: {exc}", file=sys.stderr)
+        return False
+    except Exception as exc:  # noqa: BLE001 — never propagate from notify
+        print(f"[AI Relay] kakao_notify unexpected error: {exc}", file=sys.stderr)
+        return False
 
 
 def make_dry_run_post_comment(summary_path: Path | None = None) -> Callable[[str, int, str, str], None]:
