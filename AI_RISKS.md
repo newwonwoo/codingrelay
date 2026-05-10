@@ -29,3 +29,8 @@
 - Problem: `/relay dispatch` relies on the latest hidden state comment and line-oriented `/relay plan` fields.
 - Future Symptom: Dispatch may use stale or incomplete plan text if comments are reordered, truncated, or users provide multi-line plan values.
 - Fix: Add explicit plan IDs or structured blocks if the command format grows beyond MVP single-line fields.
+
+### Risk 5
+- Problem: `/relay dispatch` renders a prompt from hidden state and hidden plan but does not validate plan completeness beyond defaults.
+- Future Symptom: A dispatch comment may be syntactically valid but too vague if goal, scope, or done are empty.
+- Fix: Add explicit BLOCK/HUMAN_REQUIRED validation once prompt rendering is stable.

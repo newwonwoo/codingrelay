@@ -160,6 +160,25 @@ def format_verify_prompt(state: Mapping[str, Any], plan: Mapping[str, Any] | Non
             f"current_agent: {state.get('current_agent', '')}",
             f"next_agent: {state.get('next_agent', '')}",
             f"round: {state.get('round', '')}",
+    return "\n".join(
+        [
+            "Self-verification prompt:",
+            "You are the current relay agent. Verify your own completed work before handoff.",
+            f"Goal: {merged_plan['goal']}",
+            f"Scope: {merged_plan['scope']}",
+            f"Out of scope: {merged_plan['out_of_scope']}",
+            f"Done condition: {merged_plan['done']}",
+            "Check:",
+            "1. Confirm the implementation satisfies the goal and done condition.",
+            "2. Confirm no out-of-scope AI calls, skill loading, or unrelated automation were added.",
+            "3. Run relevant tests or explain any environment limitation.",
+            "4. Report PASS or BLOCK with concise evidence and remaining risks.",
+            "",
+            "Relay state:",
+            f"status: {state.get('status', '')}",
+            f"current_agent: {state.get('current_agent', '')}",
+            f"next_agent: {state.get('next_agent', '')}",
+            f"round: {state.get('round', '')}",
         ]
     )
 
@@ -193,7 +212,7 @@ def format_dispatch_prompt(state: Mapping[str, Any]) -> str:
     )
 
 
-def format_verify_response(state: Mapping[str, Any]) -> str:
+def format_verify_response(state: Mapping[str, Any], plan: Mapping[str, Any] | None = None) -> str:
     """Format the human-readable relay verify response body."""
     merged_state = merge_status_state(state)
     merged_plan = merge_plan(plan)
@@ -211,6 +230,37 @@ def format_verify_response(state: Mapping[str, Any]) -> str:
     )
 
 
+def format_dispatch_prompt(state: Mapping[str, Any], plan: Mapping[str, Any] | None = None) -> str:
+    """Build a work prompt for the current relay agent without auto-calling it."""
+    merged_state = merge_status_state(state)
+    merged_plan = merge_plan(plan)
+    return "\n".join(
+        [
+            "Dispatch prompt:",
+            "You are the current relay agent. Continue the work using the relay state and plan below.",
+            f"Target agent: {merged_state['current_agent']}",
+            f"Status: {merged_state['status']}",
+            f"Current agent: {merged_state['current_agent']}",
+            f"Next agent: {merged_state['next_agent']}",
+            f"Round: {merged_state['round']}",
+            f"Goal: {merged_plan['goal']}",
+            f"Scope: {merged_plan['scope']}",
+            f"Out of scope: {merged_plan['out_of_scope']}",
+            f"Done condition: {merged_plan['done']}",
+            "Instructions:",
+            "1. Read the relay contract and evidence files before changing code.",
+            "2. Make the smallest safe change inside scope.",
+            "3. Do not perform provider calls, skill loading, agent mentions, or unrelated automation.",
+            "4. Run relevant tests or explain any environment limitation.",
+            "5. Update relay evidence before handoff.",
+        ]
+    )
+
+
+def format_dispatch_response(state: Mapping[str, Any], plan: Mapping[str, Any] | None = None) -> str:
+    """Format the human-readable relay dispatch response body."""
+    merged_state = merge_status_state(state)
+    merged_plan = merge_plan(plan)
 def format_hidden_json_comment(marker: str, payload: Mapping[str, Any]) -> str:
     """Serialize a hidden GitHub comment JSON block."""
     payload_json = json.dumps(dict(payload), ensure_ascii=False, indent=2)
@@ -243,11 +293,20 @@ def format_dispatch_response(state: Mapping[str, Any]) -> str:
             f"current_agent: {merged_state['current_agent']}",
             f"next_agent: {merged_state['next_agent']}",
             f"round: {merged_state['round']}",
+            f"goal: {merged_plan['goal']}",
+            "",
+            format_dispatch_prompt(merged_state, merged_plan),
             f"goal: {state.get('goal', '')}",
             "",
             format_dispatch_prompt(state),
         ]
     )
+
+
+def format_hidden_json_comment(marker: str, payload: Mapping[str, Any]) -> str:
+    """Serialize a hidden GitHub comment JSON block."""
+    payload_json = json.dumps(dict(payload), ensure_ascii=False, indent=2)
+    return f"<!-- {marker}\n{payload_json}\n-->"
 
 
 def format_hidden_state_comment(state: Mapping[str, Any]) -> str:
@@ -293,9 +352,14 @@ def format_dispatch_comment(state: Mapping[str, Any]) -> str:
     return f"{format_hidden_state_comment(state)}\n\n{format_dispatch_response(state)}"
 
 
-def extract_hidden_state(comment_body: str) -> dict[str, Any] | None:
-    """Extract a hidden relay state JSON object from a comment body."""
-    start_marker = f"<!-- {STATE_COMMENT_MARKER}"
+def format_dispatch_comment(state: Mapping[str, Any], plan: Mapping[str, Any] | None = None) -> str:
+    """Format the combined hidden state and visible dispatch response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_dispatch_response(state, plan)}"
+
+
+def extract_hidden_json(comment_body: str, marker: str) -> dict[str, Any] | None:
+    """Extract a hidden JSON object from a comment body for the requested marker."""
+    start_marker = f"<!-- {marker}"
     start_index = comment_body.find(start_marker)
     if start_index == -1:
         return None
@@ -477,9 +541,20 @@ def parse_plan_options(event: Mapping[str, Any]) -> dict[str, str]:
         else:
             continue
         normalized_key = key.strip().lower().replace("-", "_")
+        if normalized_key in allowed_keys:
         if normalized_key in {"goal", "scope", "out_of_scope", "done"}:
             options[normalized_key] = value.strip()
     return options
+
+
+def parse_start_options(event: Mapping[str, Any]) -> dict[str, str]:
+    """Parse start_agent, next_agent, and goal values from a start comment."""
+    return parse_key_value_options(event, {"start_agent", "current_agent", "next_agent", "goal"})
+
+
+def parse_plan_options(event: Mapping[str, Any]) -> dict[str, str]:
+    """Parse goal, scope, out_of_scope, and done values from a plan comment."""
+    return parse_key_value_options(event, {"goal", "scope", "out_of_scope", "done"})
 
 
 def build_start_state(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -641,6 +716,8 @@ def handle_issue_comment_event(
     is_handoff = is_relay_handoff_comment(event)
     is_plan = is_relay_plan_comment(event)
     is_verify = is_relay_verify_comment(event)
+    is_dispatch = is_relay_dispatch_comment(event)
+    if not is_status and not is_start and not is_handoff and not is_plan and not is_verify and not is_dispatch:
     if not is_status and not is_start and not is_handoff and not is_plan and not is_verify:
     is_plan = is_relay_plan_comment(event)
     is_dispatch = is_relay_dispatch_comment(event)
@@ -676,6 +753,8 @@ def handle_issue_comment_event(
 
     if is_dispatch:
         state = resolve_relay_state(repo_root, comments)
+        plan = resolve_relay_plan(comments)
+        post_comment(repository, issue_number, format_dispatch_comment(state, plan), token)
         post_comment(repository, issue_number, format_dispatch_comment(state), token)
         return True
 

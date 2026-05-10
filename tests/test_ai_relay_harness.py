@@ -159,6 +159,24 @@ def test_verify_command_requires_exact_first_line() -> None:
     assert ai_relay_harness.is_relay_verify_comment({"comment": {"body": "/relay start"}}) is False
 
 
+def test_dispatch_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_dispatch_comment(load_fixture("issue_comment_dispatch.json")) is True
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay dispatch"}}) is True
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": " /relay dispatch"}}) is False
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay dispatch "}}) is False
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay dispatch now"}}) is False
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay verify"}}) is False
+
+
+def test_build_start_state_parses_options() -> None:
+    state = ai_relay_harness.build_start_state(load_fixture("issue_comment_start.json"))
+
+    assert state == {
+        "status": "WORKING",
+        "current_agent": "claude",
+        "next_agent": "codex",
+        "round": 0,
+        "goal": "local relay dry-run",
 def test_build_start_state_parses_options() -> None:
     state = ai_relay_harness.build_start_state(load_fixture("issue_comment_start.json"))
 def test_plan_command_requires_exact_first_line() -> None:
@@ -379,6 +397,56 @@ def test_verify_comment_contains_latest_state_and_plan_prompt() -> None:
 
     comment = ai_relay_harness.format_verify_comment(state, plan)
 
+    comment = ai_relay_harness.format_handoff_comment(previous_agent, state)
+
+    assert previous_agent == "claude"
+    assert ai_relay_harness.extract_hidden_state(comment) == {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "requires_human": False,
+        "goal": "demo",
+    }
+    assert "[AI Relay Handoff]" in comment
+    assert "previous_agent: claude" in comment
+    assert "current_agent: codex" in comment
+
+
+def test_plan_comment_contains_hidden_plan_and_visible_response() -> None:
+    plan = ai_relay_harness.build_plan(load_fixture("issue_comment_plan.json"))
+
+    comment = ai_relay_harness.format_plan_comment(plan)
+
+    assert comment.startswith("<!-- AI_RELAY_PLAN\n")
+    assert "\n-->\n\n[AI Relay Plan]\n" in comment
+    assert ai_relay_harness.extract_hidden_plan(comment) == {
+        "goal": "local relay validation",
+        "scope": "dry-run fixture tests",
+        "out_of_scope": "provider calls, skill loading",
+        "done": "local verify prompt generated",
+    }
+    assert "goal: local relay validation" in comment
+    assert "done: local verify prompt generated" in comment
+
+
+def test_verify_comment_contains_latest_state_and_plan_prompt() -> None:
+    state = {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "old state goal",
+    }
+    plan = {
+        "goal": "local relay validation",
+        "scope": "dry-run fixture tests",
+        "out_of_scope": "provider calls, skill loading",
+        "done": "local verify prompt generated",
+    }
+
+    comment = ai_relay_harness.format_verify_comment(state, plan)
+
     assert comment.startswith("<!-- AI_RELAY_STATE\n")
     assert "\n-->\n\n[AI Relay Verify]\n" in comment
     assert ai_relay_harness.extract_hidden_state(comment)["current_agent"] == "codex"
@@ -480,8 +548,14 @@ def test_handle_issue_comment_event_posts_plan_from_latest_hidden_state(tmp_path
     )
     posted_comments: list[tuple[str, int, str, str]] = []
 
-    def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
-        posted_comments.append((repository, issue_number, body, token))
+    assert comment.startswith("<!-- AI_RELAY_STATE\n")
+    assert "\n-->\n\n[AI Relay Verify]\n" in comment
+    assert ai_relay_harness.extract_hidden_state(comment)["current_agent"] == "codex"
+    assert "Self-verification prompt:" in comment
+    assert "Goal: local relay validation" in comment
+    assert "Scope: dry-run fixture tests" in comment
+    assert "Done condition: local verify prompt generated" in comment
+    assert "current_agent: codex" in comment
 
     def list_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
         return [{"body": "old"}, {"body": hidden_comment}]
@@ -495,15 +569,20 @@ def test_handle_issue_comment_event_posts_plan_from_latest_hidden_state(tmp_path
         list_comments=list_comments,
     )
 
-    assert posted is True
-    assert len(posted_comments) == 1
-    repository, issue_number, body, token = posted_comments[0]
-    assert (repository, issue_number, token) == ("owner/repo", 42, "token")
-    assert ai_relay_harness.extract_hidden_state(body) == {
+def test_dispatch_comment_contains_current_agent_work_prompt() -> None:
+    state = {
         "status": "WORKING",
         "current_agent": "codex",
         "next_agent": "claude",
         "round": 1,
+        "goal": "old state goal",
+    }
+    plan = {
+        "goal": "local relay validation",
+        "scope": "dry-run fixture tests",
+        "out_of_scope": "provider calls, skill loading",
+        "done": "local dispatch prompt generated",
+    }
         "goal": "relay dispatch 구현",
         "scope": "현재 state와 plan을 읽어 작업 프롬프트 생성",
         "out_of_scope": "실제 AI 호출, skill loading",
@@ -513,7 +592,19 @@ def test_handle_issue_comment_event_posts_plan_from_latest_hidden_state(tmp_path
     assert "current_agent: codex" in body
     assert "scope: 현재 state와 plan을 읽어 작업 프롬프트 생성" in body
 
+    comment = ai_relay_harness.format_dispatch_comment(state, plan)
 
+    assert comment.startswith("<!-- AI_RELAY_STATE\n")
+    assert "\n-->\n\n[AI Relay Dispatch]\n" in comment
+    assert ai_relay_harness.extract_hidden_state(comment)["current_agent"] == "codex"
+    assert "Dispatch prompt:" in comment
+    assert "Target agent: codex" in comment
+    assert "Goal: local relay validation" in comment
+    assert "Scope: dry-run fixture tests" in comment
+    assert "Done condition: local dispatch prompt generated" in comment
+    assert "Do not perform provider calls, skill loading, agent mentions" in comment
+    assert "@codex" not in comment
+    assert "@claude" not in comment
 def test_handle_issue_comment_event_posts_dispatch_from_latest_hidden_state(tmp_path: Path) -> None:
     event_path = write_event(tmp_path, "/relay dispatch", issue_number=42)
     hidden_comment = ai_relay_harness.format_hidden_state_comment(
@@ -530,27 +621,114 @@ def test_handle_issue_comment_event_posts_dispatch_from_latest_hidden_state(tmp_
     )
     posted_comments: list[tuple[str, int, str, str]] = []
 
-    def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
-        posted_comments.append((repository, issue_number, body, token))
 
-    def list_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
-        return [{"body": "old"}, {"body": hidden_comment}]
+def test_status_returns_ready_without_hidden_state(tmp_path: Path) -> None:
+    thread = CommentThread()
 
-    posted = ai_relay_harness.handle_issue_comment_event(
-        tmp_path,
-        event_path,
-        "owner/repo",
-        "token",
-        post_comment=record_comment,
-        list_comments=list_comments,
-    )
+    posted = handle_fixture(tmp_path, "issue_comment_status.json", thread)
 
     assert posted is True
-    assert len(posted_comments) == 1
-    repository, issue_number, body, token = posted_comments[0]
-    assert (repository, issue_number, token) == ("owner/repo", 42, "token")
-    assert ai_relay_harness.extract_hidden_state(body) == {
+    assert thread.last_body == (
+        "[AI Relay Status]\n"
+        "status: READY\n"
+        "current_agent: none\n"
+        "next_agent: none\n"
+        "round: 0\n"
+        "requires_human: false"
+    )
+
+
+def test_start_then_status_reads_working_hidden_state(tmp_path: Path) -> None:
+    thread = CommentThread()
+
+    assert handle_fixture(tmp_path, "issue_comment_start.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_status.json", thread) is True
+
+    assert ai_relay_harness.extract_hidden_state(thread.comments[0]["body"]) == {
         "status": "WORKING",
+        "current_agent": "claude",
+        "next_agent": "codex",
+        "round": 0,
+        "goal": "local relay dry-run",
+    }
+    assert thread.last_body == (
+        "[AI Relay Status]\n"
+        "status: WORKING\n"
+        "current_agent: claude\n"
+        "next_agent: codex\n"
+        "round: 0\n"
+        "requires_human: false"
+    )
+
+
+def test_start_handoff_then_status_reads_swapped_agents_and_incremented_round(tmp_path: Path) -> None:
+    thread = CommentThread()
+
+    assert handle_fixture(tmp_path, "issue_comment_start.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_handoff.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_status.json", thread) is True
+
+    handoff_state = ai_relay_harness.extract_hidden_state(thread.comments[1]["body"])
+    assert handoff_state == {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "requires_human": False,
+        "goal": "local relay dry-run",
+    }
+    assert "previous_agent: claude" in thread.comments[1]["body"]
+    assert thread.last_body == (
+        "[AI Relay Status]\n"
+        "status: WORKING\n"
+        "current_agent: codex\n"
+        "next_agent: claude\n"
+        "round: 1\n"
+        "requires_human: false"
+    )
+
+
+def test_plan_then_verify_reads_latest_state_and_plan(tmp_path: Path) -> None:
+    thread = CommentThread()
+
+    assert handle_fixture(tmp_path, "issue_comment_start.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_handoff.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_plan.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_verify.json", thread) is True
+
+    assert ai_relay_harness.extract_hidden_plan(thread.comments[2]["body"]) == {
+        "goal": "local relay validation",
+        "scope": "dry-run fixture tests",
+        "out_of_scope": "provider calls, skill loading",
+        "done": "local verify prompt generated",
+    }
+    assert "[AI Relay Verify]\nstatus: WORKING" in thread.last_body
+    assert "current_agent: codex" in thread.last_body
+    assert "round: 1" in thread.last_body
+    assert "Goal: local relay validation" in thread.last_body
+    assert "Scope: dry-run fixture tests" in thread.last_body
+    assert "Done condition: local verify prompt generated" in thread.last_body
+
+
+def test_plan_then_dispatch_reads_latest_state_and_plan(tmp_path: Path) -> None:
+    thread = CommentThread()
+
+    assert handle_fixture(tmp_path, "issue_comment_start.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_handoff.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_plan.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_dispatch.json", thread) is True
+
+    assert "[AI Relay Dispatch]\nstatus: WORKING" in thread.last_body
+    assert "current_agent: codex" in thread.last_body
+    assert "Target agent: codex" in thread.last_body
+    assert "round: 1" in thread.last_body
+    assert "Goal: local relay validation" in thread.last_body
+    assert "Scope: dry-run fixture tests" in thread.last_body
+    assert "Done condition: local verify prompt generated" in thread.last_body
+    assert "@codex" not in thread.last_body
+    assert "@claude" not in thread.last_body
+
+
         "current_agent": "codex",
         "next_agent": "claude",
         "round": 1,
@@ -661,6 +839,7 @@ def test_variant_commands_are_ignored(tmp_path: Path) -> None:
         "/relay handoff now",
         "/relay plan now",
         "/relay verify now",
+        "/relay dispatch now",
     ]
     for index, body in enumerate(variants):
         thread = CommentThread()

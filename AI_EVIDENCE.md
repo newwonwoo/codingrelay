@@ -86,3 +86,26 @@
 
 ### Not Verified
 - Live GitHub comment creation for `/relay plan` or `/relay dispatch` after pushing to GitHub.
+
+## 2026-05-10 Relay Dispatch Command Support
+
+### Commands Run
+- `python -m pytest tests/test_ai_relay_harness.py -q`
+- `python -m py_compile .github/scripts/ai_relay_harness.py`
+
+### Results
+- Pytest suite passed with coverage for `/relay dispatch` exact matching, latest hidden state/plan prompt rendering, and variant command rejection.
+- Harness script compiles with Python.
+
+### Failed Tests
+- None.
+
+### Logs
+- `26 passed in 0.17s`
+
+### Screenshots / Runtime Evidence
+- Not applicable for this non-UI harness change.
+
+### Not Verified
+- Live GitHub comment creation for `/relay dispatch` after pushing to GitHub.
+- Any live `@claude` or `@codex` invocation; intentionally not implemented.
