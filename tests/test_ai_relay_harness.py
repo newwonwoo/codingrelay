@@ -161,6 +161,26 @@ def test_verify_command_requires_exact_first_line() -> None:
 
 def test_build_start_state_parses_options() -> None:
     state = ai_relay_harness.build_start_state(load_fixture("issue_comment_start.json"))
+def test_plan_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_plan_comment({"comment": {"body": "/relay plan"}}) is True
+    assert ai_relay_harness.is_relay_plan_comment({"comment": {"body": "/relay plan\ngoal: ship"}}) is True
+    assert ai_relay_harness.is_relay_plan_comment({"comment": {"body": " /relay plan"}}) is False
+    assert ai_relay_harness.is_relay_plan_comment({"comment": {"body": "/relay plan "}}) is False
+    assert ai_relay_harness.is_relay_plan_comment({"comment": {"body": "/relay plan now"}}) is False
+    assert ai_relay_harness.is_relay_plan_comment({"comment": {"body": "/relay dispatch"}}) is False
+
+
+def test_dispatch_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay dispatch"}}) is True
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay dispatch\nnote: go"}}) is True
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": " /relay dispatch"}}) is False
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay dispatch "}}) is False
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay dispatch now"}}) is False
+    assert ai_relay_harness.is_relay_dispatch_comment({"comment": {"body": "/relay plan"}}) is False
+
+
+def test_build_start_state_uses_defaults() -> None:
+    state = ai_relay_harness.build_start_state({"comment": {"body": "/relay start"}})
 
     assert state == {
         "status": "WORKING",
@@ -168,6 +188,40 @@ def test_build_start_state_parses_options() -> None:
         "next_agent": "codex",
         "round": 0,
         "goal": "local relay dry-run",
+    }
+
+
+def test_build_plan_state_overlays_plan_fields() -> None:
+    state = ai_relay_harness.build_plan_state(
+        {
+            "status": "WORKING",
+            "current_agent": "codex",
+            "next_agent": "claude",
+            "round": 1,
+            "goal": "old",
+        },
+        {
+            "comment": {
+                "body": (
+                    "/relay plan\n"
+                    "goal: relay dispatch 구현\n"
+                    "scope: 현재 state와 plan을 읽어 작업 프롬프트 생성\n"
+                    "out_of_scope: 실제 AI 호출, skill loading\n"
+                    "done: dispatch 프롬프트 댓글이 생성되면 성공"
+                )
+            }
+        },
+    )
+
+    assert state == {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "relay dispatch 구현",
+        "scope": "현재 state와 plan을 읽어 작업 프롬프트 생성",
+        "out_of_scope": "실제 AI 호출, skill loading",
+        "done": "dispatch 프롬프트 댓글이 생성되면 성공",
     }
 
 
@@ -190,6 +244,82 @@ def test_start_comment_contains_hidden_state_and_visible_response() -> None:
 
 def test_handoff_comment_contains_swapped_state() -> None:
     previous_agent, state = ai_relay_harness.build_handoff_state(
+def test_verify_comment_contains_hidden_state_and_self_verification_prompt() -> None:
+    state = {
+        "status": "WORKING",
+        "current_agent": "claude",
+        "next_agent": "codex",
+        "round": 0,
+        "goal": "/relay verify 구현",
+        "scope": "자기검증 프롬프트 생성",
+        "out_of_scope": "실제 AI 호출, skill loading",
+        "done": "verify 댓글이 생성되면 성공",
+    }
+
+    comment = ai_relay_harness.format_verify_comment(state)
+
+    assert comment.startswith("<!-- AI_RELAY_STATE\n")
+    assert "\n-->\n\n[AI Relay Verify]\n" in comment
+    assert ai_relay_harness.extract_hidden_state(comment) == state
+    assert "Self-verification prompt:" in comment
+    assert "Goal: /relay verify 구현" in comment
+    assert "Scope: 자기검증 프롬프트 생성" in comment
+    assert "Out of scope: 실제 AI 호출, skill loading" in comment
+    assert "Done condition: verify 댓글이 생성되면 성공" in comment
+    assert "Report PASS or BLOCK" in comment
+
+
+def test_plan_comment_contains_hidden_state_and_plan_response() -> None:
+    state = {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "relay dispatch 구현",
+        "scope": "현재 state와 plan을 읽어 작업 프롬프트 생성",
+        "out_of_scope": "실제 AI 호출, skill loading",
+        "done": "dispatch 프롬프트 댓글이 생성되면 성공",
+    }
+
+    comment = ai_relay_harness.format_plan_comment(state)
+
+    assert comment.startswith("<!-- AI_RELAY_STATE\n")
+    assert "\n-->\n\n[AI Relay Plan]\n" in comment
+    assert ai_relay_harness.extract_hidden_state(comment) == state
+    assert "goal: relay dispatch 구현" in comment
+    assert "scope: 현재 state와 plan을 읽어 작업 프롬프트 생성" in comment
+    assert "done: dispatch 프롬프트 댓글이 생성되면 성공" in comment
+
+
+def test_dispatch_comment_contains_hidden_state_and_dispatch_prompt() -> None:
+    state = {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "relay dispatch 구현",
+        "scope": "현재 state와 plan을 읽어 작업 프롬프트 생성",
+        "out_of_scope": "실제 AI 호출, skill loading",
+        "done": "dispatch 프롬프트 댓글이 생성되면 성공",
+    }
+
+    comment = ai_relay_harness.format_dispatch_comment(state)
+
+    assert comment.startswith("<!-- AI_RELAY_STATE\n")
+    assert "\n-->\n\n[AI Relay Dispatch]\n" in comment
+    assert ai_relay_harness.extract_hidden_state(comment) == state
+    assert "Dispatch prompt:" in comment
+    assert "Current agent: codex" in comment
+    assert "Goal: relay dispatch 구현" in comment
+    assert "Scope: 현재 state와 plan을 읽어 작업 프롬프트 생성" in comment
+    assert "Out of scope: 실제 AI 호출, skill loading" in comment
+    assert "Done condition: dispatch 프롬프트 댓글이 생성되면 성공" in comment
+    assert "Do not perform provider calls" in comment
+
+
+def test_handle_issue_comment_event_posts_status_from_latest_hidden_state(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay status", issue_number=42)
+    hidden_comment = ai_relay_harness.format_hidden_state_comment(
         {
             "status": "WORKING",
             "current_agent": "claude",
@@ -327,6 +457,129 @@ def test_start_handoff_then_status_reads_swapped_agents_and_incremented_round(tm
 
 def test_plan_then_verify_reads_latest_state_and_plan(tmp_path: Path) -> None:
     thread = CommentThread()
+def test_handle_issue_comment_event_posts_plan_from_latest_hidden_state(tmp_path: Path) -> None:
+    event_path = write_event(
+        tmp_path,
+        (
+            "/relay plan\n"
+            "goal: relay dispatch 구현\n"
+            "scope: 현재 state와 plan을 읽어 작업 프롬프트 생성\n"
+            "out_of_scope: 실제 AI 호출, skill loading\n"
+            "done: dispatch 프롬프트 댓글이 생성되면 성공"
+        ),
+        issue_number=42,
+    )
+    hidden_comment = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "WORKING",
+            "current_agent": "codex",
+            "next_agent": "claude",
+            "round": 1,
+            "goal": "old",
+        }
+    )
+    posted_comments: list[tuple[str, int, str, str]] = []
+
+    def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
+        posted_comments.append((repository, issue_number, body, token))
+
+    def list_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
+        return [{"body": "old"}, {"body": hidden_comment}]
+
+    posted = ai_relay_harness.handle_issue_comment_event(
+        tmp_path,
+        event_path,
+        "owner/repo",
+        "token",
+        post_comment=record_comment,
+        list_comments=list_comments,
+    )
+
+    assert posted is True
+    assert len(posted_comments) == 1
+    repository, issue_number, body, token = posted_comments[0]
+    assert (repository, issue_number, token) == ("owner/repo", 42, "token")
+    assert ai_relay_harness.extract_hidden_state(body) == {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "relay dispatch 구현",
+        "scope": "현재 state와 plan을 읽어 작업 프롬프트 생성",
+        "out_of_scope": "실제 AI 호출, skill loading",
+        "done": "dispatch 프롬프트 댓글이 생성되면 성공",
+    }
+    assert "[AI Relay Plan]\nstatus: WORKING" in body
+    assert "current_agent: codex" in body
+    assert "scope: 현재 state와 plan을 읽어 작업 프롬프트 생성" in body
+
+
+def test_handle_issue_comment_event_posts_dispatch_from_latest_hidden_state(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay dispatch", issue_number=42)
+    hidden_comment = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "WORKING",
+            "current_agent": "codex",
+            "next_agent": "claude",
+            "round": 1,
+            "goal": "relay dispatch 구현",
+            "scope": "현재 state와 plan을 읽어 작업 프롬프트 생성",
+            "out_of_scope": "실제 AI 호출, skill loading",
+            "done": "dispatch 프롬프트 댓글이 생성되면 성공",
+        }
+    )
+    posted_comments: list[tuple[str, int, str, str]] = []
+
+    def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
+        posted_comments.append((repository, issue_number, body, token))
+
+    def list_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
+        return [{"body": "old"}, {"body": hidden_comment}]
+
+    posted = ai_relay_harness.handle_issue_comment_event(
+        tmp_path,
+        event_path,
+        "owner/repo",
+        "token",
+        post_comment=record_comment,
+        list_comments=list_comments,
+    )
+
+    assert posted is True
+    assert len(posted_comments) == 1
+    repository, issue_number, body, token = posted_comments[0]
+    assert (repository, issue_number, token) == ("owner/repo", 42, "token")
+    assert ai_relay_harness.extract_hidden_state(body) == {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "relay dispatch 구현",
+        "scope": "현재 state와 plan을 읽어 작업 프롬프트 생성",
+        "out_of_scope": "실제 AI 호출, skill loading",
+        "done": "dispatch 프롬프트 댓글이 생성되면 성공",
+    }
+    assert "[AI Relay Dispatch]\nstatus: WORKING" in body
+    assert "Dispatch prompt:" in body
+    assert "Current agent: codex" in body
+    assert "Done condition: dispatch 프롬프트 댓글이 생성되면 성공" in body
+
+
+def test_handle_issue_comment_event_posts_verify_from_latest_hidden_state(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay verify", issue_number=42)
+    hidden_comment = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "WORKING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 0,
+            "goal": "/relay verify 구현",
+            "scope": "자기검증 프롬프트 생성",
+            "out_of_scope": "실제 AI 호출, skill loading",
+            "done": "verify 댓글이 생성되면 성공",
+        }
+    )
+    posted_comments: list[tuple[str, int, str, str]] = []
 
     assert handle_fixture(tmp_path, "issue_comment_start.json", thread) is True
     assert handle_fixture(tmp_path, "issue_comment_handoff.json", thread) is True
