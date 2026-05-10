@@ -894,6 +894,133 @@ def test_handle_event_status_command_still_responds_when_locked(tmp_path: Path) 
     assert "requires_human: true" in body
 
 
+def test_stop_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_stop_comment(load_fixture("issue_comment_stop.json")) is True
+    assert ai_relay_harness.is_relay_stop_comment({"comment": {"body": "/relay stop"}}) is True
+    assert ai_relay_harness.is_relay_stop_comment({"comment": {"body": " /relay stop"}}) is False
+    assert ai_relay_harness.is_relay_stop_comment({"comment": {"body": "/relay stop "}}) is False
+    assert ai_relay_harness.is_relay_stop_comment({"comment": {"body": "/relay stopnow"}}) is False
+    assert ai_relay_harness.is_relay_stop_comment({"comment": {"body": "/relay status"}}) is False
+
+
+def test_fix_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_fix_comment(load_fixture("issue_comment_fix.json")) is True
+    assert ai_relay_harness.is_relay_fix_comment({"comment": {"body": "/relay fix"}}) is True
+    assert ai_relay_harness.is_relay_fix_comment({"comment": {"body": " /relay fix"}}) is False
+    assert ai_relay_harness.is_relay_fix_comment({"comment": {"body": "/relay fix "}}) is False
+    assert ai_relay_harness.is_relay_fix_comment({"comment": {"body": "/relay fix now"}}) is False
+    assert ai_relay_harness.is_relay_fix_comment({"comment": {"body": "/relay verify"}}) is False
+
+
+def test_build_stop_state_marks_done_with_reason() -> None:
+    state = ai_relay_harness.build_stop_state(
+        {"status": "WORKING", "current_agent": "claude", "next_agent": "codex", "round": 2},
+        "scope changed",
+    )
+    assert state["status"] == "DONE"
+    assert state["stop_reason"] == "scope changed"
+    assert state["round"] == 2
+
+
+def test_build_fix_state_increments_self_fix_count() -> None:
+    state = ai_relay_harness.build_fix_state(
+        {
+            "status": "WORKING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 1,
+            "self_fix_count": 0,
+        }
+    )
+    assert state["status"] == "NEEDS_SELF_FIX"
+    assert state["self_fix_count"] == 1
+
+
+def test_build_fix_state_promotes_to_human_required_when_max_self_fix_exceeded() -> None:
+    state = ai_relay_harness.build_fix_state(
+        {
+            "status": "WORKING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 1,
+            "self_fix_count": 2,
+            "max_self_fix": 2,
+        }
+    )
+    # count becomes 3 which exceeds max_self_fix=2
+    assert state["self_fix_count"] == 3
+    assert state["status"] == "HUMAN_REQUIRED"
+    assert state["requires_human"] is True
+
+
+def test_format_self_fix_prompt_lists_block_reasons() -> None:
+    prompt = ai_relay_harness.format_self_fix_prompt(
+        {
+            "status": "NEEDS_SELF_FIX",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 1,
+            "self_fix_count": 1,
+        },
+        ["AI_BATON.md missing section '## Changed Files'.", "AI_EVIDENCE.md is missing."],
+    )
+    assert "Self-fix prompt:" in prompt
+    assert "Target agent: claude" in prompt
+    assert "AI_BATON.md missing section '## Changed Files'." in prompt
+    assert "AI_EVIDENCE.md is missing." in prompt
+    assert "@claude" not in prompt
+    assert "@codex" not in prompt
+
+
+def test_handle_event_stop_marks_state_done(tmp_path: Path) -> None:
+    write_minimal_baton(tmp_path)
+    write_minimal_evidence(tmp_path)
+    thread = CommentThread()
+    assert handle_fixture(tmp_path, "issue_comment_start.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_stop.json", thread) is True
+
+    body = thread.last_body
+    assert "[AI Relay Stopped]" in body
+    assert "reason: 작업 범위가 커져서 사람 검토 필요" in body
+    stopped = ai_relay_harness.extract_hidden_state(body)
+    assert stopped["status"] == "DONE"
+    assert stopped["stop_reason"] == "작업 범위가 커져서 사람 검토 필요"
+
+
+def test_handle_event_stop_works_even_when_locked(tmp_path: Path) -> None:
+    locked_state = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "HUMAN_REQUIRED",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 4,
+            "max_rounds": 3,
+            "requires_human": True,
+        }
+    )
+    thread = CommentThread()
+    thread.comments.append({"body": locked_state})
+    assert handle_fixture(tmp_path, "issue_comment_stop.json", thread) is True
+    body = thread.last_body
+    assert "[AI Relay Stopped]" in body
+    stopped = ai_relay_harness.extract_hidden_state(body)
+    assert stopped["status"] == "DONE"
+
+
+def test_handle_event_fix_emits_self_fix_prompt_with_gate_reasons(tmp_path: Path) -> None:
+    # Intentionally do not write baton/evidence so the gate fails.
+    thread = CommentThread()
+    assert handle_fixture(tmp_path, "issue_comment_fix.json", thread) is True
+    body = thread.last_body
+    assert "[AI Relay Self-Fix]" in body
+    assert "Self-fix prompt:" in body
+    assert "AI_BATON.md is missing." in body
+    assert "AI_EVIDENCE.md is missing." in body
+    state = ai_relay_harness.extract_hidden_state(body)
+    assert state["status"] == "NEEDS_SELF_FIX"
+    assert state["self_fix_count"] == 1
+
+
 def test_workflow_pull_request_test_gate_runs_pytest() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ai-relay-tests.yml").read_text(encoding="utf-8")
 
@@ -911,6 +1038,8 @@ def test_variant_commands_are_ignored(tmp_path: Path) -> None:
         "/relay dispatch now",
         "/relay accept now",
         "/relay reject now",
+        "/relay stop now",
+        "/relay fix now",
     ]
     for index, body in enumerate(variants):
         thread = CommentThread()

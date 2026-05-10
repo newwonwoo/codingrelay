@@ -1,0 +1,8 @@
+{
+  "issue": {
+    "number": 42
+  },
+  "comment": {
+    "body": "/relay stop\nreason: 작업 범위가 커져서 사람 검토 필요"
+  }
+}

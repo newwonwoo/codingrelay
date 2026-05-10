@@ -18,6 +18,8 @@ VERIFY_COMMAND = "/relay verify"
 DISPATCH_COMMAND = "/relay dispatch"
 ACCEPT_COMMAND = "/relay accept"
 REJECT_COMMAND = "/relay reject"
+STOP_COMMAND = "/relay stop"
+FIX_COMMAND = "/relay fix"
 STATE_FILE = "AI_RELAY_STATE.json"
 STATE_COMMENT_MARKER = "AI_RELAY_STATE"
 PLAN_COMMENT_MARKER = "AI_RELAY_PLAN"
@@ -437,6 +439,16 @@ def is_relay_reject_comment(event: Mapping[str, Any]) -> bool:
     return get_command_line(event) == REJECT_COMMAND
 
 
+def is_relay_stop_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay stop."""
+    return get_command_line(event) == STOP_COMMAND
+
+
+def is_relay_fix_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay fix."""
+    return get_command_line(event) == FIX_COMMAND
+
+
 def get_issue_number(event: Mapping[str, Any]) -> int:
     """Return the issue number shared by Issue and PR comment threads."""
     issue = event.get("issue")
@@ -747,6 +759,102 @@ def format_reject_comment(state: Mapping[str, Any], reason: str) -> str:
     return f"{format_hidden_state_comment(state)}\n\n{format_reject_response(state, reason)}"
 
 
+def build_stop_state(base_state: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    """Mark the relay as stopped (DONE) by user request."""
+    merged_state = merge_status_state(base_state)
+    return {
+        **dict(merged_state),
+        "status": "DONE",
+        "stop_reason": reason,
+    }
+
+
+def build_fix_state(base_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Mark the relay as needing self-fix and bump self_fix_count."""
+    merged_state = merge_status_state(base_state)
+    next_self_fix = _coerce_int(merged_state.get("self_fix_count")) + 1
+    next_state = {
+        **dict(merged_state),
+        "status": "NEEDS_SELF_FIX",
+        "self_fix_count": next_self_fix,
+    }
+    return enforce_limits(next_state)
+
+
+def format_stop_response(state: Mapping[str, Any], reason: str) -> str:
+    """Format the human-readable relay stop response body."""
+    return "\n".join(
+        [
+            "[AI Relay Stopped]",
+            f"status: {state['status']}",
+            f"current_agent: {state['current_agent']}",
+            f"next_agent: {state['next_agent']}",
+            f"round: {state['round']}",
+            f"reason: {reason}",
+            "",
+            "No further /relay handoff, /relay accept, or /relay reject is processed.",
+            "Use /relay start to begin a new task.",
+        ]
+    )
+
+
+def format_self_fix_prompt(state: Mapping[str, Any], reasons: Sequence[str]) -> str:
+    """Build a self-fix prompt the current agent is expected to act on."""
+    merged_state = merge_status_state(state)
+    lines = [
+        "Self-fix prompt:",
+        "Your baton or evidence failed the pre-handoff gate.",
+        "Do not hand off yet.",
+        f"Target agent: {merged_state['current_agent']}",
+        f"Status: {merged_state['status']}",
+        f"Round: {merged_state['round']}",
+        f"self_fix_count: {merged_state.get('self_fix_count', 0)}",
+        "Block reasons:",
+    ]
+    if reasons:
+        lines.extend(f"- {reason}" for reason in reasons)
+    else:
+        lines.append("- (no specific reason supplied — re-run /relay verify)")
+    lines.extend(
+        [
+            "Required:",
+            "1. Update code if needed.",
+            "2. Update AI_BATON.md so all required sections are filled.",
+            "3. Update AI_EVIDENCE.md with Commands Run, Results, and Not Verified.",
+            "4. Update AI_RISKS.md with any new six-month failure risks.",
+            "5. Set Handoff Status to PASS, CONDITIONAL_PASS, or BLOCK.",
+            "6. Re-run /relay verify before any handoff attempt.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_fix_response(state: Mapping[str, Any], reasons: Sequence[str]) -> str:
+    """Format the human-readable relay fix response body."""
+    return "\n".join(
+        [
+            "[AI Relay Self-Fix]",
+            f"status: {state['status']}",
+            f"current_agent: {state['current_agent']}",
+            f"next_agent: {state['next_agent']}",
+            f"round: {state['round']}",
+            f"self_fix_count: {state.get('self_fix_count', 0)}",
+            "",
+            format_self_fix_prompt(state, reasons),
+        ]
+    )
+
+
+def format_stop_comment(state: Mapping[str, Any], reason: str) -> str:
+    """Format the combined hidden state and visible stop response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_stop_response(state, reason)}"
+
+
+def format_fix_comment(state: Mapping[str, Any], reasons: Sequence[str]) -> str:
+    """Format the combined hidden state and visible fix response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_fix_response(state, reasons)}"
+
+
 def github_api_request(
     url: str,
     token: str,
@@ -856,6 +964,8 @@ def handle_issue_comment_event(
     is_dispatch = is_relay_dispatch_comment(event)
     is_accept = is_relay_accept_comment(event)
     is_reject = is_relay_reject_comment(event)
+    is_stop = is_relay_stop_comment(event)
+    is_fix = is_relay_fix_comment(event)
     if not (
         is_status
         or is_start
@@ -865,6 +975,8 @@ def handle_issue_comment_event(
         or is_dispatch
         or is_accept
         or is_reject
+        or is_stop
+        or is_fix
     ):
         return False
 
@@ -883,7 +995,9 @@ def handle_issue_comment_event(
 
     resolved_state = resolve_relay_state(repo_root, comments)
     breaches = evaluate_limit_breach(resolved_state)
-    if breaches or merge_status_state(resolved_state).get("requires_human") is True:
+    is_locked = bool(breaches) or merge_status_state(resolved_state).get("requires_human") is True
+    # /relay stop is always honored so a human can clear a HUMAN_REQUIRED state.
+    if is_locked and not is_stop:
         locked_state = enforce_limits(resolved_state)
         post_comment(
             repository,
@@ -927,6 +1041,18 @@ def handle_issue_comment_event(
         state = resolve_relay_state(repo_root, comments)
         plan = resolve_relay_plan(comments)
         post_comment(repository, issue_number, format_dispatch_comment(state, plan), token)
+        return True
+
+    if is_stop:
+        reason = parse_reason_option(event)
+        state = build_stop_state(resolve_relay_state(repo_root, comments), reason)
+        post_comment(repository, issue_number, format_stop_comment(state, reason), token)
+        return True
+
+    if is_fix:
+        state = build_fix_state(resolve_relay_state(repo_root, comments))
+        _, reasons = evaluate_handoff_gate(repo_root)
+        post_comment(repository, issue_number, format_fix_comment(state, reasons), token)
         return True
 
     return False
