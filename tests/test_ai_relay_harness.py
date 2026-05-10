@@ -76,6 +76,7 @@ def test_status_command_requires_exact_comment_body() -> None:
     assert ai_relay_harness.is_relay_status_comment({"comment": {"body": " /relay status"}}) is False
     assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay status "}}) is False
     assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay start"}}) is False
+    assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay handoff"}}) is False
 
 
 def test_start_command_requires_exact_first_line() -> None:
@@ -84,6 +85,15 @@ def test_start_command_requires_exact_first_line() -> None:
     assert ai_relay_harness.is_relay_start_comment({"comment": {"body": " /relay start"}}) is False
     assert ai_relay_harness.is_relay_start_comment({"comment": {"body": "/relay start "}}) is False
     assert ai_relay_harness.is_relay_start_comment({"comment": {"body": "/relay handoff"}}) is False
+
+
+def test_handoff_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay handoff"}}) is True
+    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay handoff\nnote: done"}}) is True
+    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": " /relay handoff"}}) is False
+    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay handoff "}}) is False
+    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay handoff now"}}) is False
+    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay start"}}) is False
 
 
 def test_build_start_state_uses_defaults() -> None:
@@ -130,6 +140,69 @@ def test_start_comment_contains_hidden_state_and_visible_response() -> None:
     assert comment.startswith("<!-- AI_RELAY_STATE\n")
     assert "\n-->\n\n[AI Relay Started]\n" in comment
     assert ai_relay_harness.extract_hidden_state(comment) == state
+    assert "goal: demo" in comment
+
+
+def test_build_handoff_state_swaps_claude_to_codex_and_increments_round() -> None:
+    state, previous_agent = ai_relay_harness.build_handoff_state(
+        {
+            "status": "WORKING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 0,
+            "goal": "ship relay",
+        }
+    )
+
+    assert previous_agent == "claude"
+    assert state == {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "ship relay",
+    }
+
+
+def test_build_handoff_state_swaps_codex_to_claude_and_increments_round() -> None:
+    state, previous_agent = ai_relay_harness.build_handoff_state(
+        {
+            "status": "WORKING",
+            "current_agent": "codex",
+            "next_agent": "claude",
+            "round": 7,
+            "goal": "continue relay",
+        }
+    )
+
+    assert previous_agent == "codex"
+    assert state == {
+        "status": "WORKING",
+        "current_agent": "claude",
+        "next_agent": "codex",
+        "round": 8,
+        "goal": "continue relay",
+    }
+
+
+def test_handoff_comment_contains_hidden_state_and_visible_response() -> None:
+    state = {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "demo",
+    }
+
+    comment = ai_relay_harness.format_handoff_comment(state, previous_agent="claude")
+
+    assert comment.startswith("<!-- AI_RELAY_STATE\n")
+    assert "\n-->\n\n[AI Relay Handoff]\n" in comment
+    assert ai_relay_harness.extract_hidden_state(comment) == state
+    assert "previous_agent: claude" in comment
+    assert "current_agent: codex" in comment
+    assert "next_agent: claude" in comment
+    assert "round: 1" in comment
     assert "goal: demo" in comment
 
 
@@ -248,8 +321,145 @@ def test_handle_issue_comment_event_starts_relay_with_hidden_state(tmp_path: Pat
     assert "goal: implement start" in body
 
 
-def test_handle_issue_comment_event_ignores_relay_handoff(tmp_path: Path) -> None:
-    event_path = write_event(tmp_path, "/relay handoff")
+def test_handle_issue_comment_event_handoffs_from_latest_hidden_state(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay handoff", issue_number=42)
+    hidden_comment = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "WORKING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 0,
+            "goal": "handoff goal",
+        }
+    )
+    posted_comments: list[tuple[str, int, str, str]] = []
+
+    def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
+        posted_comments.append((repository, issue_number, body, token))
+
+    def list_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
+        return [{"body": "old"}, {"body": hidden_comment}]
+
+    posted = ai_relay_harness.handle_issue_comment_event(
+        tmp_path,
+        event_path,
+        "owner/repo",
+        "token",
+        post_comment=record_comment,
+        list_comments=list_comments,
+    )
+
+    assert posted is True
+    assert len(posted_comments) == 1
+    repository, issue_number, body, token = posted_comments[0]
+    assert (repository, issue_number, token) == ("owner/repo", 42, "token")
+    assert ai_relay_harness.extract_hidden_state(body) == {
+        "status": "WORKING",
+        "current_agent": "codex",
+        "next_agent": "claude",
+        "round": 1,
+        "goal": "handoff goal",
+    }
+    assert "[AI Relay Handoff]\nstatus: WORKING" in body
+    assert "previous_agent: claude" in body
+    assert "current_agent: codex" in body
+    assert "next_agent: claude" in body
+    assert "round: 1" in body
+    assert "goal: handoff goal" in body
+
+
+def test_handle_issue_comment_event_handoffs_from_file_or_ready_fallback(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay handoff", issue_number=42)
+    posted_comments: list[tuple[str, int, str, str]] = []
+
+    def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
+        posted_comments.append((repository, issue_number, body, token))
+
+    def list_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
+        return []
+
+    posted = ai_relay_harness.handle_issue_comment_event(
+        tmp_path,
+        event_path,
+        "owner/repo",
+        "token",
+        post_comment=record_comment,
+        list_comments=list_comments,
+    )
+
+    assert posted is True
+    assert len(posted_comments) == 1
+    body = posted_comments[0][2]
+    assert ai_relay_harness.extract_hidden_state(body) == {
+        "status": "WORKING",
+        "current_agent": "none",
+        "next_agent": "none",
+        "round": 1,
+        "goal": "",
+    }
+
+
+def test_handoff_then_status_reads_latest_handoff_state(tmp_path: Path) -> None:
+    handoff_event_path = write_event(tmp_path, "/relay handoff", issue_number=42)
+    initial_hidden_comment = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "WORKING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 0,
+            "goal": "status after handoff",
+        }
+    )
+    posted_comments: list[tuple[str, int, str, str]] = []
+
+    def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
+        posted_comments.append((repository, issue_number, body, token))
+
+    def list_initial_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
+        return [{"body": initial_hidden_comment}]
+
+    handoff_posted = ai_relay_harness.handle_issue_comment_event(
+        tmp_path,
+        handoff_event_path,
+        "owner/repo",
+        "token",
+        post_comment=record_comment,
+        list_comments=list_initial_comments,
+    )
+
+    assert handoff_posted is True
+    assert len(posted_comments) == 1
+
+    status_event_path = write_event(tmp_path, "/relay status", issue_number=42)
+
+    def list_handoff_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
+        return [{"body": initial_hidden_comment}, {"body": posted_comments[0][2]}]
+
+    status_posted = ai_relay_harness.handle_issue_comment_event(
+        tmp_path,
+        status_event_path,
+        "owner/repo",
+        "token",
+        post_comment=record_comment,
+        list_comments=list_handoff_comments,
+    )
+
+    assert status_posted is True
+    assert posted_comments[-1] == (
+        "owner/repo",
+        42,
+        "[AI Relay Status]\n"
+        "status: WORKING\n"
+        "current_agent: codex\n"
+        "next_agent: claude\n"
+        "round: 1\n"
+        "requires_human: false",
+        "token",
+    )
+
+
+def test_handle_issue_comment_event_ignores_handoff_variant(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay handoff now")
     posted_comments: list[tuple[str, int, str, str]] = []
 
     def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:

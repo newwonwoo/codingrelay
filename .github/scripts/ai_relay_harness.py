@@ -12,6 +12,7 @@ from urllib import parse, request
 
 STATUS_COMMAND = "/relay status"
 START_COMMAND = "/relay start"
+HANDOFF_COMMAND = "/relay handoff"
 STATE_FILE = "AI_RELAY_STATE.json"
 STATE_COMMENT_MARKER = "AI_RELAY_STATE"
 
@@ -89,6 +90,21 @@ def format_start_response(state: Mapping[str, Any]) -> str:
     )
 
 
+def format_handoff_response(state: Mapping[str, Any], previous_agent: str) -> str:
+    """Format the human-readable relay handoff response body."""
+    return "\n".join(
+        [
+            "[AI Relay Handoff]",
+            f"status: {state['status']}",
+            f"previous_agent: {previous_agent}",
+            f"current_agent: {state['current_agent']}",
+            f"next_agent: {state['next_agent']}",
+            f"round: {state['round']}",
+            f"goal: {state.get('goal', '')}",
+        ]
+    )
+
+
 def format_hidden_state_comment(state: Mapping[str, Any]) -> str:
     """Serialize relay state into a hidden GitHub comment block."""
     state_json = json.dumps(dict(state), ensure_ascii=False, indent=2)
@@ -98,6 +114,11 @@ def format_hidden_state_comment(state: Mapping[str, Any]) -> str:
 def format_start_comment(state: Mapping[str, Any]) -> str:
     """Format the combined hidden state and visible start response comment."""
     return f"{format_hidden_state_comment(state)}\n\n{format_start_response(state)}"
+
+
+def format_handoff_comment(state: Mapping[str, Any], previous_agent: str) -> str:
+    """Format the combined hidden state and visible handoff response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_handoff_response(state, previous_agent)}"
 
 
 def extract_hidden_state(comment_body: str) -> dict[str, Any] | None:
@@ -171,6 +192,11 @@ def is_relay_start_comment(event: Mapping[str, Any]) -> bool:
     return get_command_line(event) == START_COMMAND
 
 
+def is_relay_handoff_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay handoff."""
+    return get_command_line(event) == HANDOFF_COMMAND
+
+
 def get_issue_number(event: Mapping[str, Any]) -> int:
     """Return the issue number shared by Issue and PR comment threads."""
     issue = event.get("issue")
@@ -212,6 +238,32 @@ def build_start_state(event: Mapping[str, Any]) -> dict[str, Any]:
         "round": DEFAULT_START_STATE["round"],
         "goal": goal,
     }
+
+
+def increment_round(value: Any) -> int:
+    """Increment a stored relay round value, defaulting invalid values to zero."""
+    try:
+        return int(value) + 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def build_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    """Swap current_agent and next_agent, increment round, and keep the goal."""
+    current_agent = str(state.get("current_agent", DEFAULT_RELAY_STATE["current_agent"]))
+    next_agent = str(state.get("next_agent", DEFAULT_RELAY_STATE["next_agent"]))
+    previous_agent = current_agent
+
+    return (
+        {
+            "status": "WORKING",
+            "current_agent": next_agent,
+            "next_agent": current_agent,
+            "round": increment_round(state.get("round", 0)),
+            "goal": state.get("goal", ""),
+        },
+        previous_agent,
+    )
 
 
 def github_api_request(
@@ -284,6 +336,17 @@ def resolve_status_state(
     return load_relay_state(repo_root)
 
 
+def resolve_relay_state(
+    repo_root: Path | str,
+    comments: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Resolve raw relay state from hidden comments first, then file/default fallback."""
+    state = latest_hidden_state(comments)
+    if state is not None:
+        return state
+    return load_relay_state(repo_root)
+
+
 def handle_issue_comment_event(
     repo_root: Path | str,
     event_path: Path | str,
@@ -292,22 +355,34 @@ def handle_issue_comment_event(
     post_comment: Callable[[str, int, str, str], None] = post_issue_comment,
     list_comments: Callable[[str, int, str], Sequence[Mapping[str, Any]]] = list_issue_comments,
 ) -> bool:
-    """Handle exact /relay status and /relay start issue_comment events.
+    """Handle exact relay issue_comment events.
 
-    Returns False for all other comments. `/relay handoff`, `@claude`, and
-    `@codex` automation are intentionally not implemented in V1.
+    Returns False for all other comments. `@claude`, `@codex`, self-verification,
+    receiver-acceptance, and skill loading automation are intentionally not
+    implemented in this version.
     """
     event = load_github_event(event_path)
-    if not is_relay_status_comment(event) and not is_relay_start_comment(event):
+    is_status = is_relay_status_comment(event)
+    is_start = is_relay_start_comment(event)
+    is_handoff = is_relay_handoff_comment(event)
+    if not is_status and not is_start and not is_handoff:
         return False
 
     issue_number = get_issue_number(event)
-    if is_relay_start_comment(event):
+
+    if is_start:
         state = build_start_state(event)
         post_comment(repository, issue_number, format_start_comment(state), token)
         return True
 
     comments = list_comments(repository, issue_number, token)
+
+    if is_handoff:
+        current_state = resolve_relay_state(repo_root, comments)
+        handoff_state, previous_agent = build_handoff_state(current_state)
+        post_comment(repository, issue_number, format_handoff_comment(handoff_state, previous_agent), token)
+        return True
+
     state = resolve_status_state(repo_root, comments)
     post_comment(repository, issue_number, format_status_response(state), token)
     return True
