@@ -46,6 +46,12 @@ DEFAULT_RELAY_STATE: dict[str, Any] = {
     "requires_human": False,
 }
 
+DEFAULT_LIMITS: dict[str, int] = {
+    "max_rounds": 3,
+    "max_self_fix": 2,
+    "max_receiver_reject": 1,
+}
+
 DEFAULT_START_STATE: dict[str, Any] = {
     "status": "WORKING",
     "current_agent": "claude",
@@ -494,17 +500,15 @@ def build_handoff_state(base_state: Mapping[str, Any]) -> tuple[str, dict[str, A
     """Swap current/next agents and increment the relay round."""
     merged_state = merge_status_state(base_state)
     previous_agent = str(merged_state["current_agent"])
-    try:
-        next_round = int(merged_state["round"]) + 1
-    except (TypeError, ValueError):
-        next_round = 1
-    return previous_agent, {
+    next_round = _coerce_int(merged_state.get("round")) + 1
+    swapped = {
         **dict(merged_state),
         "status": "WORKING",
         "current_agent": merged_state["next_agent"],
         "next_agent": merged_state["current_agent"],
         "round": next_round,
     }
+    return previous_agent, enforce_limits(swapped)
 
 
 def build_plan(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -608,6 +612,74 @@ def evaluate_handoff_gate(repo_root: Path | str) -> tuple[str, list[str]]:
     return ("BLOCK" if reasons else "PASS"), reasons
 
 
+def _coerce_int(value: Any, default: int = 0) -> int:
+    """Tolerantly coerce a state field to int; fall back to default."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def evaluate_limit_breach(state: Mapping[str, Any]) -> list[str]:
+    """Return human-readable reasons when round/self_fix/receiver_reject limits are exceeded."""
+    reasons: list[str] = []
+    rounds = _coerce_int(state.get("round"))
+    max_rounds = _coerce_int(state.get("max_rounds"), DEFAULT_LIMITS["max_rounds"])
+    self_fix = _coerce_int(state.get("self_fix_count"))
+    max_self_fix = _coerce_int(state.get("max_self_fix"), DEFAULT_LIMITS["max_self_fix"])
+    rejects = _coerce_int(state.get("receiver_reject_count"))
+    max_rejects = _coerce_int(state.get("max_receiver_reject"), DEFAULT_LIMITS["max_receiver_reject"])
+    if rounds > max_rounds:
+        reasons.append(f"round {rounds} exceeded max_rounds {max_rounds}.")
+    if self_fix > max_self_fix:
+        reasons.append(f"self_fix_count {self_fix} exceeded max_self_fix {max_self_fix}.")
+    if rejects > max_rejects:
+        reasons.append(f"receiver_reject_count {rejects} exceeded max_receiver_reject {max_rejects}.")
+    return reasons
+
+
+def enforce_limits(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Promote state to HUMAN_REQUIRED when any relay limit is exceeded."""
+    breaches = evaluate_limit_breach(state)
+    if not breaches:
+        return dict(state)
+    return {
+        **dict(state),
+        "status": "HUMAN_REQUIRED",
+        "requires_human": True,
+    }
+
+
+def format_human_required_response(state: Mapping[str, Any], reasons: Sequence[str]) -> str:
+    """Format the human-readable HUMAN_REQUIRED response body."""
+    merged_state = merge_status_state(state)
+    lines = [
+        "[AI Relay Human Required]",
+        f"status: {merged_state['status']}",
+        f"current_agent: {merged_state['current_agent']}",
+        f"next_agent: {merged_state['next_agent']}",
+        f"round: {merged_state['round']}",
+        f"requires_human: {format_status_value(merged_state['requires_human'])}",
+        "Reasons:",
+    ]
+    lines.extend(f"- {reason}" for reason in reasons)
+    lines.extend(
+        [
+            "",
+            "Action:",
+            "1. A human reviewer must inspect AI_BATON.md, AI_EVIDENCE.md, and AI_RISKS.md.",
+            "2. Decide whether to redirect the goal, lower the limits, or close the relay.",
+            "3. No further /relay handoff or /relay accept will succeed until the human resolves this.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_human_required_comment(state: Mapping[str, Any], reasons: Sequence[str]) -> str:
+    """Format the combined hidden state and visible HUMAN_REQUIRED response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_human_required_response(state, reasons)}"
+
+
 def build_accept_state(base_state: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """Swap agents and increment round when the receiver accepts the baton."""
     return build_handoff_state(base_state)
@@ -616,15 +688,13 @@ def build_accept_state(base_state: Mapping[str, Any]) -> tuple[str, dict[str, An
 def build_reject_state(base_state: Mapping[str, Any]) -> dict[str, Any]:
     """Keep current_agent and bump receiver_reject_count when the receiver rejects."""
     merged_state = merge_status_state(base_state)
-    try:
-        next_reject_count = int(merged_state.get("receiver_reject_count", 0)) + 1
-    except (TypeError, ValueError):
-        next_reject_count = 1
-    return {
+    next_reject_count = _coerce_int(merged_state.get("receiver_reject_count")) + 1
+    next_state = {
         **dict(merged_state),
         "status": "REJECTED_BY_RECEIVER",
         "receiver_reject_count": next_reject_count,
     }
+    return enforce_limits(next_state)
 
 
 def format_accept_response(previous_agent: str, state: Mapping[str, Any]) -> str:
@@ -806,6 +876,23 @@ def handle_issue_comment_event(
 
     comments = list_comments(repository, issue_number, token)
 
+    if is_status:
+        state = resolve_status_state(repo_root, comments)
+        post_comment(repository, issue_number, format_status_response(state), token)
+        return True
+
+    resolved_state = resolve_relay_state(repo_root, comments)
+    breaches = evaluate_limit_breach(resolved_state)
+    if breaches or merge_status_state(resolved_state).get("requires_human") is True:
+        locked_state = enforce_limits(resolved_state)
+        post_comment(
+            repository,
+            issue_number,
+            format_human_required_comment(locked_state, breaches or ["requires_human flag set."]),
+            token,
+        )
+        return True
+
     if is_handoff:
         previous_agent, state = build_handoff_state(resolve_relay_state(repo_root, comments))
         post_comment(repository, issue_number, format_handoff_comment(previous_agent, state), token)
@@ -842,9 +929,7 @@ def handle_issue_comment_event(
         post_comment(repository, issue_number, format_dispatch_comment(state, plan), token)
         return True
 
-    state = resolve_status_state(repo_root, comments)
-    post_comment(repository, issue_number, format_status_response(state), token)
-    return True
+    return False
 
 
 def make_dry_run_post_comment(summary_path: Path | None = None) -> Callable[[str, int, str, str], None]:

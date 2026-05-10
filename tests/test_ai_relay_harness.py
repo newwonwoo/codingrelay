@@ -766,6 +766,134 @@ def test_repo_baton_and_evidence_pass_their_own_gate() -> None:
     assert ai_relay_harness.check_evidence_required(REPO_ROOT) == []
 
 
+def test_evaluate_limit_breach_returns_empty_when_within_limits() -> None:
+    state = {
+        "round": 1,
+        "max_rounds": 3,
+        "self_fix_count": 0,
+        "max_self_fix": 2,
+        "receiver_reject_count": 0,
+        "max_receiver_reject": 1,
+    }
+    assert ai_relay_harness.evaluate_limit_breach(state) == []
+
+
+def test_evaluate_limit_breach_flags_each_exceeded_counter() -> None:
+    state = {
+        "round": 5,
+        "max_rounds": 3,
+        "self_fix_count": 4,
+        "max_self_fix": 2,
+        "receiver_reject_count": 2,
+        "max_receiver_reject": 1,
+    }
+    breaches = ai_relay_harness.evaluate_limit_breach(state)
+    assert any("max_rounds" in b for b in breaches)
+    assert any("max_self_fix" in b for b in breaches)
+    assert any("max_receiver_reject" in b for b in breaches)
+
+
+def test_evaluate_limit_breach_uses_default_limits_when_unset() -> None:
+    breaches = ai_relay_harness.evaluate_limit_breach({"round": 99})
+    assert any("max_rounds" in b for b in breaches)
+
+
+def test_enforce_limits_promotes_status_to_human_required() -> None:
+    state = ai_relay_harness.enforce_limits({"round": 99, "status": "WORKING", "current_agent": "claude"})
+    assert state["status"] == "HUMAN_REQUIRED"
+    assert state["requires_human"] is True
+
+
+def test_enforce_limits_is_no_op_when_within_limits() -> None:
+    base = {"round": 1, "status": "WORKING", "current_agent": "claude", "next_agent": "codex"}
+    assert ai_relay_harness.enforce_limits(base) == base
+
+
+def test_handoff_promotes_to_human_required_when_max_rounds_exceeded() -> None:
+    _, state = ai_relay_harness.build_handoff_state(
+        {
+            "status": "WORKING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 3,
+            "max_rounds": 3,
+            "goal": "demo",
+        }
+    )
+    # round becomes 4 which exceeds max_rounds=3
+    assert state["round"] == 4
+    assert state["status"] == "HUMAN_REQUIRED"
+    assert state["requires_human"] is True
+
+
+def test_reject_promotes_to_human_required_when_max_reject_exceeded() -> None:
+    state = ai_relay_harness.build_reject_state(
+        {
+            "status": "RECEIVER_REVIEWING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 1,
+            "receiver_reject_count": 1,
+            "max_receiver_reject": 1,
+            "goal": "demo",
+        }
+    )
+    # count becomes 2 which exceeds max_receiver_reject=1
+    assert state["receiver_reject_count"] == 2
+    assert state["status"] == "HUMAN_REQUIRED"
+    assert state["requires_human"] is True
+
+
+def test_handle_event_returns_human_required_comment_when_state_is_locked(tmp_path: Path) -> None:
+    write_minimal_baton(tmp_path)
+    write_minimal_evidence(tmp_path)
+    locked_state = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "HUMAN_REQUIRED",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 4,
+            "max_rounds": 3,
+            "requires_human": True,
+            "goal": "demo",
+        }
+    )
+    thread = CommentThread()
+    thread.comments.append({"body": locked_state})
+
+    assert handle_fixture(tmp_path, "issue_comment_handoff.json", thread) is True
+    body = thread.last_body
+    assert "[AI Relay Human Required]" in body
+    assert "round 4 exceeded max_rounds 3" in body
+    assert "requires_human: true" in body
+    # hidden state must remain HUMAN_REQUIRED, not advance
+    locked = ai_relay_harness.extract_hidden_state(body)
+    assert locked["status"] == "HUMAN_REQUIRED"
+    assert locked["round"] == 4
+
+
+def test_handle_event_status_command_still_responds_when_locked(tmp_path: Path) -> None:
+    locked_state = ai_relay_harness.format_hidden_state_comment(
+        {
+            "status": "HUMAN_REQUIRED",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 4,
+            "requires_human": True,
+            "goal": "demo",
+        }
+    )
+    thread = CommentThread()
+    thread.comments.append({"body": locked_state})
+
+    assert handle_fixture(tmp_path, "issue_comment_status.json", thread) is True
+    body = thread.last_body
+    # Status response shape — still readable to humans even when locked
+    assert "[AI Relay Status]" in body
+    assert "status: HUMAN_REQUIRED" in body
+    assert "requires_human: true" in body
+
+
 def test_workflow_pull_request_test_gate_runs_pytest() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ai-relay-tests.yml").read_text(encoding="utf-8")
 
