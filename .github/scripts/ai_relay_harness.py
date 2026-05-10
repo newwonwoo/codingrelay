@@ -21,6 +21,22 @@ REJECT_COMMAND = "/relay reject"
 STATE_FILE = "AI_RELAY_STATE.json"
 STATE_COMMENT_MARKER = "AI_RELAY_STATE"
 PLAN_COMMENT_MARKER = "AI_RELAY_PLAN"
+BATON_FILE = "AI_BATON.md"
+EVIDENCE_FILE = "AI_EVIDENCE.md"
+
+BATON_REQUIRED_SECTIONS: tuple[str, ...] = (
+    "Task Goal",
+    "Current Agent",
+    "Next Agent",
+    "Changed Files",
+    "Evidence",
+    "Handoff Status",
+)
+EVIDENCE_REQUIRED_SECTIONS: tuple[str, ...] = (
+    "Commands Run",
+    "Results",
+    "Not Verified",
+)
 
 DEFAULT_RELAY_STATE: dict[str, Any] = {
     "status": "READY",
@@ -259,6 +275,20 @@ def format_plan_comment(plan: Mapping[str, Any]) -> str:
     return f"{format_hidden_plan_comment(plan)}\n\n{format_plan_response(plan)}"
 
 
+def format_gate_verdict(verdict: str, reasons: Sequence[str]) -> str:
+    """Format the auto handoff-gate verdict block appended to /relay verify."""
+    if verdict == "PASS" and not reasons:
+        return "\n".join(
+            [
+                "Handoff gate: PASS",
+                "All required AI_BATON.md and AI_EVIDENCE.md sections are filled.",
+            ]
+        )
+    lines = ["Handoff gate: BLOCK", "Reasons:"]
+    lines.extend(f"- {reason}" for reason in reasons)
+    return "\n".join(lines)
+
+
 def format_verify_comment(state: Mapping[str, Any], plan: Mapping[str, Any] | None = None) -> str:
     """Format the combined hidden state and visible verify response comment."""
     return f"{format_hidden_state_comment(state)}\n\n{format_verify_response(state, plan)}"
@@ -493,6 +523,91 @@ def parse_reason_option(event: Mapping[str, Any]) -> str:
     return parse_key_value_options(event, {"reason"}).get("reason", "")
 
 
+def extract_section_content(markdown: str, section_title: str) -> str | None:
+    """Return the trimmed content under a `## <section_title>` header, if present.
+
+    Returns None when the section header is absent. Returns "" when the section
+    exists but has no non-blank content before the next header or end of file.
+    """
+    lines = markdown.splitlines()
+    target = f"## {section_title}"
+    in_section = False
+    collected: list[str] = []
+    for line in lines:
+        if line.strip() == target:
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("## "):
+                break
+            collected.append(line)
+    if not in_section:
+        return None
+    content = "\n".join(collected).strip()
+    return content
+
+
+def section_is_filled(markdown: str, section_title: str) -> bool:
+    """Return True when the section exists and has at least one non-placeholder line."""
+    content = extract_section_content(markdown, section_title)
+    if content is None or not content:
+        return False
+    placeholder_only = True
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped in {"-", "*"}:
+            continue
+        placeholder_only = False
+        break
+    return not placeholder_only
+
+
+def check_baton_required(repo_root: Path | str) -> list[str]:
+    """Return a list of human-readable problems with AI_BATON.md, or [] when PASS."""
+    baton_path = Path(repo_root) / BATON_FILE
+    if not baton_path.is_file():
+        return [f"{BATON_FILE} is missing."]
+    content = baton_path.read_text(encoding="utf-8")
+    problems: list[str] = []
+    for section in BATON_REQUIRED_SECTIONS:
+        if extract_section_content(content, section) is None:
+            problems.append(f"{BATON_FILE} missing section '## {section}'.")
+        elif not section_is_filled(content, section):
+            problems.append(f"{BATON_FILE} section '## {section}' is empty.")
+    handoff = extract_section_content(content, "Handoff Status")
+    if handoff is not None:
+        normalized = handoff.strip().splitlines()[0].strip() if handoff.strip() else ""
+        allowed = {"PASS", "CONDITIONAL_PASS", "BLOCK"}
+        if normalized and normalized not in allowed:
+            problems.append(
+                f"{BATON_FILE} 'Handoff Status' must be PASS, CONDITIONAL_PASS, or BLOCK; got '{normalized}'."
+            )
+    return problems
+
+
+def check_evidence_required(repo_root: Path | str) -> list[str]:
+    """Return a list of human-readable problems with AI_EVIDENCE.md, or [] when PASS."""
+    evidence_path = Path(repo_root) / EVIDENCE_FILE
+    if not evidence_path.is_file():
+        return [f"{EVIDENCE_FILE} is missing."]
+    content = evidence_path.read_text(encoding="utf-8")
+    problems: list[str] = []
+    for section in EVIDENCE_REQUIRED_SECTIONS:
+        if extract_section_content(content, section) is None:
+            problems.append(f"{EVIDENCE_FILE} missing section '## {section}'.")
+        elif not section_is_filled(content, section):
+            problems.append(f"{EVIDENCE_FILE} section '## {section}' is empty.")
+    return problems
+
+
+def evaluate_handoff_gate(repo_root: Path | str) -> tuple[str, list[str]]:
+    """Return (verdict, reasons) where verdict is 'PASS' or 'BLOCK'."""
+    reasons = check_baton_required(repo_root) + check_evidence_required(repo_root)
+    return ("BLOCK" if reasons else "PASS"), reasons
+
+
 def build_accept_state(base_state: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """Swap agents and increment round when the receiver accepts the baton."""
     return build_handoff_state(base_state)
@@ -715,7 +830,10 @@ def handle_issue_comment_event(
     if is_verify:
         state = resolve_relay_state(repo_root, comments)
         plan = resolve_relay_plan(comments)
-        post_comment(repository, issue_number, format_verify_comment(state, plan), token)
+        verdict, reasons = evaluate_handoff_gate(repo_root)
+        verify_comment = format_verify_comment(state, plan)
+        gate_block = format_gate_verdict(verdict, reasons)
+        post_comment(repository, issue_number, f"{verify_comment}\n\n{gate_block}", token)
         return True
 
     if is_dispatch:

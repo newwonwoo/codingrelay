@@ -600,6 +600,172 @@ def test_start_handoff_reject_then_status_keeps_current_agent(tmp_path: Path) ->
     )
 
 
+def write_minimal_baton(repo_root: Path, *, handoff_status: str = "PASS") -> None:
+    (repo_root / "AI_BATON.md").write_text(
+        "\n".join(
+            [
+                "# AI Baton",
+                "",
+                "## Task Goal",
+                "- demo",
+                "",
+                "## Current Agent",
+                "- claude",
+                "",
+                "## Next Agent",
+                "- codex",
+                "",
+                "## Changed Files",
+                "- harness.py",
+                "",
+                "## Evidence",
+                "- pytest passed",
+                "",
+                f"## Handoff Status",
+                handoff_status,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_minimal_evidence(repo_root: Path) -> None:
+    (repo_root / "AI_EVIDENCE.md").write_text(
+        "\n".join(
+            [
+                "# AI Evidence",
+                "",
+                "## Commands Run",
+                "- pytest -q",
+                "",
+                "## Results",
+                "- 35 passed",
+                "",
+                "## Not Verified",
+                "- live workflow",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_baton_gate_passes_when_all_required_sections_filled(tmp_path: Path) -> None:
+    write_minimal_baton(tmp_path)
+    assert ai_relay_harness.check_baton_required(tmp_path) == []
+
+
+def test_baton_gate_reports_missing_file(tmp_path: Path) -> None:
+    problems = ai_relay_harness.check_baton_required(tmp_path)
+    assert problems == ["AI_BATON.md is missing."]
+
+
+def test_baton_gate_reports_empty_section(tmp_path: Path) -> None:
+    (tmp_path / "AI_BATON.md").write_text(
+        "\n".join(
+            [
+                "# AI Baton",
+                "## Task Goal",
+                "-",
+                "## Current Agent",
+                "- claude",
+                "## Next Agent",
+                "- codex",
+                "## Changed Files",
+                "- f.py",
+                "## Evidence",
+                "- ok",
+                "## Handoff Status",
+                "PASS",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    problems = ai_relay_harness.check_baton_required(tmp_path)
+    assert problems == ["AI_BATON.md section '## Task Goal' is empty."]
+
+
+def test_baton_gate_reports_missing_section(tmp_path: Path) -> None:
+    (tmp_path / "AI_BATON.md").write_text(
+        "\n".join(
+            [
+                "# AI Baton",
+                "## Task Goal",
+                "- demo",
+                "## Current Agent",
+                "- claude",
+                "## Next Agent",
+                "- codex",
+                "## Evidence",
+                "- ok",
+                "## Handoff Status",
+                "PASS",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    problems = ai_relay_harness.check_baton_required(tmp_path)
+    assert problems == ["AI_BATON.md missing section '## Changed Files'."]
+
+
+def test_baton_gate_rejects_invalid_handoff_status(tmp_path: Path) -> None:
+    write_minimal_baton(tmp_path, handoff_status="MAYBE")
+    problems = ai_relay_harness.check_baton_required(tmp_path)
+    assert any("Handoff Status" in p for p in problems)
+
+
+def test_evidence_gate_passes_when_all_sections_filled(tmp_path: Path) -> None:
+    write_minimal_evidence(tmp_path)
+    assert ai_relay_harness.check_evidence_required(tmp_path) == []
+
+
+def test_evidence_gate_reports_missing_file(tmp_path: Path) -> None:
+    problems = ai_relay_harness.check_evidence_required(tmp_path)
+    assert problems == ["AI_EVIDENCE.md is missing."]
+
+
+def test_evaluate_handoff_gate_returns_pass_when_both_files_complete(tmp_path: Path) -> None:
+    write_minimal_baton(tmp_path)
+    write_minimal_evidence(tmp_path)
+    verdict, reasons = ai_relay_harness.evaluate_handoff_gate(tmp_path)
+    assert verdict == "PASS"
+    assert reasons == []
+
+
+def test_evaluate_handoff_gate_returns_block_when_baton_missing(tmp_path: Path) -> None:
+    write_minimal_evidence(tmp_path)
+    verdict, reasons = ai_relay_harness.evaluate_handoff_gate(tmp_path)
+    assert verdict == "BLOCK"
+    assert "AI_BATON.md is missing." in reasons
+
+
+def test_verify_comment_includes_block_verdict_when_files_missing(tmp_path: Path) -> None:
+    thread = CommentThread()
+    assert handle_fixture(tmp_path, "issue_comment_verify.json", thread) is True
+    body = thread.last_body
+    assert "[AI Relay Verify]" in body
+    assert "Handoff gate: BLOCK" in body
+    assert "AI_BATON.md is missing." in body
+    assert "AI_EVIDENCE.md is missing." in body
+
+
+def test_verify_comment_includes_pass_verdict_when_files_complete(tmp_path: Path) -> None:
+    write_minimal_baton(tmp_path)
+    write_minimal_evidence(tmp_path)
+    thread = CommentThread()
+    assert handle_fixture(tmp_path, "issue_comment_verify.json", thread) is True
+    body = thread.last_body
+    assert "[AI Relay Verify]" in body
+    assert "Handoff gate: PASS" in body
+    assert "All required AI_BATON.md and AI_EVIDENCE.md sections are filled." in body
+
+
+def test_repo_baton_and_evidence_pass_their_own_gate() -> None:
+    assert ai_relay_harness.check_baton_required(REPO_ROOT) == []
+    assert ai_relay_harness.check_evidence_required(REPO_ROOT) == []
+
+
 def test_workflow_pull_request_test_gate_runs_pytest() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ai-relay-tests.yml").read_text(encoding="utf-8")
 
