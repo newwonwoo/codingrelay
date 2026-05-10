@@ -61,3 +61,51 @@
 
 ### Results
 - workflow_run removed because no target workflow exists.
+
+## 2026-05-10 Relay Dispatch Prompt Support
+
+### Commands Run
+- `python3 -m py_compile .github/scripts/ai_relay_harness.py`
+- `python3 -m pytest -q`
+- `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/ai-relay.yml"); puts "workflow yaml parsed"'`
+
+### Results
+- Harness script compiles with Python 3.
+- Pytest suite passed with coverage for `/relay plan` parsing and `/relay dispatch` prompt comment generation.
+- Workflow YAML parses successfully with Ruby Psych.
+
+### Failed Tests
+- None.
+
+### Logs
+- `25 passed in 0.06s`
+- `workflow yaml parsed`
+
+### Screenshots / Runtime Evidence
+- Not applicable for this non-UI harness change.
+
+### Not Verified
+- Live GitHub comment creation for `/relay plan` or `/relay dispatch` after pushing to GitHub.
+
+## 2026-05-10 Relay Dispatch Command Support
+
+### Commands Run
+- `python -m pytest tests/test_ai_relay_harness.py -q`
+- `python -m py_compile .github/scripts/ai_relay_harness.py`
+
+### Results
+- Pytest suite passed with coverage for `/relay dispatch` exact matching, latest hidden state/plan prompt rendering, and variant command rejection.
+- Harness script compiles with Python.
+
+### Failed Tests
+- None.
+
+### Logs
+- `26 passed in 0.17s`
+
+### Screenshots / Runtime Evidence
+- Not applicable for this non-UI harness change.
+
+### Not Verified
+- Live GitHub comment creation for `/relay dispatch` after pushing to GitHub.
+- Any live `@claude` or `@codex` invocation; intentionally not implemented.

@@ -1,7 +1,7 @@
 # AI Baton
 
 ## Task Goal
-- Initialize the V1 relay skeleton and GitHub Actions harness from `ai_relay_orchestrator_v1.md`.
+- Implement `/relay dispatch` prompt generation from the latest hidden relay state and latest hidden relay plan.
 
 ## Current Agent
 - codex
@@ -10,61 +10,49 @@
 - claude
 
 ## Work Completed
-- Created the initial V1 relay file structure.
-- Added a minimal GitHub Actions harness entrypoint for relay validation.
-- Ran the local workflow-dispatch harness validation commands for the current branch.
-- Confirmed remote GitHub Actions dispatch was not runnable from this container because `gh` is unavailable and no git remote is configured.
+- Added exact `/relay dispatch` command matching.
+- Added dispatch prompt/comment rendering that targets the current agent by name without `@claude` or `@codex` mentions.
+- Wired `/relay dispatch` into the existing issue/PR comment handler so it reads latest hidden state and plan before posting the prompt.
+- Added an `issue_comment_dispatch.json` fixture and pytest coverage for command matching, prompt rendering, state/plan integration, and variant command rejection.
+- Re-ran required local verification commands.
 
 ## Changed Files
-- AI_BATON.md
-- AI_EVIDENCE.md
-- AI_RISKS.md
-- AGENTS.md
-- AI_RELAY_CONTRACT.md
-- AI_RELAY_STATE.json
-- AI_BATON.md
-- AI_DECISIONS.md
-- AI_EVIDENCE.md
-- AI_RISKS.md
-- CLAUDE.md
-- CODEX.md
-- docs/ai-relay-v1-implementation-plan.md
 - .github/scripts/ai_relay_harness.py
-- .github/workflows/ai-relay.yml
+- tests/test_ai_relay_harness.py
+- tests/fixtures/issue_comment_dispatch.json
+- AI_BATON.md
+- AI_EVIDENCE.md
+- AI_RISKS.md
+- AI_DECISIONS.md
 
 ## Decision Reasons
-- Keep Phase 1 limited to skeleton files and a thin harness, matching the design's MVP boundary.
-- Use repository-local Markdown and JSON files so GitHub Actions can validate state without external services.
+- Keep dispatch as a pre-call prompt generation step only, matching the requested boundary.
+- Reuse hidden JSON state and plan as the source of truth to minimize changes and avoid workflow edits.
 
 ## Evidence
-- Test: `python3 .github/scripts/ai_relay_harness.py --event-name workflow_dispatch --event-path /tmp/ai-relay-empty-event.json --summary /tmp/ai-relay-summary.md`
-- Build: Not applicable for Phase 1 skeleton.
-- Lint: `python3 -m py_compile .github/scripts/ai_relay_harness.py`; `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/ai-relay.yml"); puts "workflow yaml parsed"'`
+- Test: `python -m pytest tests/test_ai_relay_harness.py -q`
+- Build: Not applicable for this Python harness change.
+- Lint: `python -m py_compile .github/scripts/ai_relay_harness.py`
 - Typecheck: Not applicable for this Python standard-library script.
-- Manual Check: Confirmed required relay files exist and the harness reports READY state.
-- Runtime Check: `python3 .github/scripts/ai_relay_harness.py --event-name workflow_dispatch --event-path /tmp/ai-relay-empty-event.json --summary /tmp/ai-relay-summary.md` passed on 2026-05-09.
-- Workflow Dispatch Check: `gh` is not installed and `git remote -v` is empty, so live GitHub workflow dispatch was not started from this container.
+- Manual Check: Confirmed dispatch output contains no `@codex` or `@claude` mention strings in tests.
 
 ## Known Risks
-- GitHub comment posting is intentionally not implemented in Phase 1.
-- Kakao notification is intentionally represented as a future integration point, not a live sender.
-- Live GitHub Actions dispatch still requires running from GitHub UI/API after the workflow exists on a reachable remote branch.
+- `/relay dispatch` only posts a prompt; it does not invoke an agent or load skills.
+- Dispatch prompt quality depends on the latest hidden plan fields being complete.
 
 ## Six-Month Failure Risks
-- GitHub event payload shapes can change or require additional handling when Phase 2 command parsing is added.
-- Required section checks may need to become stricter once real handoffs begin.
+- If plan/state hidden comment formats change, dispatch may render incomplete prompts until fixtures are updated.
+- Users may expect `/relay dispatch` to auto-call agents; this step intentionally does not.
 
 ## Receiver Compatibility Risks
-- Next Agent may assume full orchestration is implemented; this commit only provides the Phase 1 skeleton and validation harness.
+- Next Agent may assume dispatch automation exists; only prompt generation exists.
 
 ## Do Not Touch
-- Do not expand into dashboard, auto-merge, token detection, or multi-repo orchestration during MVP skeleton work.
+- Do not add live `@codex`/`@claude` invocation, skill loading, dashboards, merge automation, or multi-repository orchestration for this step.
 
 ## Next Actions
-- Trigger the workflow in GitHub once the branch is pushed to a remote where Actions can see `.github/workflows/ai-relay.yml`.
-- If GitHub rejects the workflow definition, remove or scope the Phase 1 `workflow_run` trigger as the smallest follow-up fix.
-- Implement Phase 2 command parser for `/relay start`, `/relay status`, `/relay stop`, and `/relay handoff`.
-- Add prompt rendering after command parsing is stable.
+- Review the dispatch prompt wording in a real PR comment dry-run.
+- If approved, a later step can add explicit opt-in agent mention behavior.
 
 ## Handoff Status
-CONDITIONAL_PASS
+PASS
