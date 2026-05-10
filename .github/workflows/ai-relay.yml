@@ -41,7 +41,7 @@ jobs:
           repository: ${{ steps.checkout-target.outputs.repository }}
           ref: ${{ steps.checkout-target.outputs.ref }}
 
-      - name: Handle /relay status
+      - name: Handle relay comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python .github/scripts/ai_relay_harness.py
