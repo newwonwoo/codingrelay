@@ -12,7 +12,7 @@ from urllib import parse, request
 
 STATUS_COMMAND = "/relay status"
 START_COMMAND = "/relay start"
-HANDOFF_COMMAND = "/relay handoff"
+VERIFY_COMMAND = "/relay verify"
 STATE_FILE = "AI_RELAY_STATE.json"
 STATE_COMMENT_MARKER = "AI_RELAY_STATE"
 
@@ -90,17 +90,42 @@ def format_start_response(state: Mapping[str, Any]) -> str:
     )
 
 
-def format_handoff_response(state: Mapping[str, Any], previous_agent: str) -> str:
-    """Format the human-readable relay handoff response body."""
+def format_verify_prompt(state: Mapping[str, Any]) -> str:
+    """Build a self-verification prompt without calling an AI provider."""
+    goal = state.get("goal", "")
+    scope = state.get("scope", "")
+    out_of_scope = state.get("out_of_scope", "")
+    done = state.get("done", "")
     return "\n".join(
         [
-            "[AI Relay Handoff]",
-            f"status: {state['status']}",
-            f"previous_agent: {previous_agent}",
-            f"current_agent: {state['current_agent']}",
-            f"next_agent: {state['next_agent']}",
-            f"round: {state['round']}",
+            "Self-verification prompt:",
+            "You are the current relay agent. Verify your own completed work before handoff.",
+            f"Goal: {goal}",
+            f"Scope: {scope}",
+            f"Out of scope: {out_of_scope}",
+            f"Done condition: {done}",
+            "Check:",
+            "1. Confirm the implementation satisfies the goal and done condition.",
+            "2. Confirm no out-of-scope AI calls, skill loading, or unrelated automation were added.",
+            "3. Run relevant tests or explain any environment limitation.",
+            "4. Report PASS or BLOCK with concise evidence and remaining risks.",
+        ]
+    )
+
+
+def format_verify_response(state: Mapping[str, Any]) -> str:
+    """Format the human-readable relay verify response body."""
+    merged_state = merge_status_state(state)
+    return "\n".join(
+        [
+            "[AI Relay Verify]",
+            f"status: {merged_state['status']}",
+            f"current_agent: {merged_state['current_agent']}",
+            f"next_agent: {merged_state['next_agent']}",
+            f"round: {merged_state['round']}",
             f"goal: {state.get('goal', '')}",
+            "",
+            format_verify_prompt(state),
         ]
     )
 
@@ -116,9 +141,9 @@ def format_start_comment(state: Mapping[str, Any]) -> str:
     return f"{format_hidden_state_comment(state)}\n\n{format_start_response(state)}"
 
 
-def format_handoff_comment(state: Mapping[str, Any], previous_agent: str) -> str:
-    """Format the combined hidden state and visible handoff response comment."""
-    return f"{format_hidden_state_comment(state)}\n\n{format_handoff_response(state, previous_agent)}"
+def format_verify_comment(state: Mapping[str, Any]) -> str:
+    """Format the combined hidden state and visible verify response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_verify_response(state)}"
 
 
 def extract_hidden_state(comment_body: str) -> dict[str, Any] | None:
@@ -192,9 +217,9 @@ def is_relay_start_comment(event: Mapping[str, Any]) -> bool:
     return get_command_line(event) == START_COMMAND
 
 
-def is_relay_handoff_comment(event: Mapping[str, Any]) -> bool:
-    """Return True when the first comment line exactly matches /relay handoff."""
-    return get_command_line(event) == HANDOFF_COMMAND
+def is_relay_verify_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay verify."""
+    return get_command_line(event) == VERIFY_COMMAND
 
 
 def get_issue_number(event: Mapping[str, Any]) -> int:
@@ -238,32 +263,6 @@ def build_start_state(event: Mapping[str, Any]) -> dict[str, Any]:
         "round": DEFAULT_START_STATE["round"],
         "goal": goal,
     }
-
-
-def increment_round(value: Any) -> int:
-    """Increment a stored relay round value, defaulting invalid values to zero."""
-    try:
-        return int(value) + 1
-    except (TypeError, ValueError):
-        return 1
-
-
-def build_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
-    """Swap current_agent and next_agent, increment round, and keep the goal."""
-    current_agent = str(state.get("current_agent", DEFAULT_RELAY_STATE["current_agent"]))
-    next_agent = str(state.get("next_agent", DEFAULT_RELAY_STATE["next_agent"]))
-    previous_agent = current_agent
-
-    return (
-        {
-            "status": "WORKING",
-            "current_agent": next_agent,
-            "next_agent": current_agent,
-            "round": increment_round(state.get("round", 0)),
-            "goal": state.get("goal", ""),
-        },
-        previous_agent,
-    )
 
 
 def github_api_request(
@@ -355,21 +354,19 @@ def handle_issue_comment_event(
     post_comment: Callable[[str, int, str, str], None] = post_issue_comment,
     list_comments: Callable[[str, int, str], Sequence[Mapping[str, Any]]] = list_issue_comments,
 ) -> bool:
-    """Handle exact relay issue_comment events.
+    """Handle exact /relay status, /relay start, and /relay verify comments.
 
-    Returns False for all other comments. `@claude`, `@codex`, self-verification,
-    receiver-acceptance, and skill loading automation are intentionally not
-    implemented in this version.
+    Returns False for all other comments. AI provider calls, skill loading,
+    `@claude`, and `@codex` automation are intentionally not implemented.
     """
     event = load_github_event(event_path)
     is_status = is_relay_status_comment(event)
     is_start = is_relay_start_comment(event)
-    is_handoff = is_relay_handoff_comment(event)
-    if not is_status and not is_start and not is_handoff:
+    is_verify = is_relay_verify_comment(event)
+    if not is_status and not is_start and not is_verify:
         return False
 
     issue_number = get_issue_number(event)
-
     if is_start:
         state = build_start_state(event)
         post_comment(repository, issue_number, format_start_comment(state), token)
@@ -377,10 +374,9 @@ def handle_issue_comment_event(
 
     comments = list_comments(repository, issue_number, token)
 
-    if is_handoff:
-        current_state = resolve_relay_state(repo_root, comments)
-        handoff_state, previous_agent = build_handoff_state(current_state)
-        post_comment(repository, issue_number, format_handoff_comment(handoff_state, previous_agent), token)
+    if is_verify:
+        state = resolve_relay_state(repo_root, comments)
+        post_comment(repository, issue_number, format_verify_comment(state), token)
         return True
 
     state = resolve_status_state(repo_root, comments)

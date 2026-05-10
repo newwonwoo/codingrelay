@@ -14,20 +14,16 @@ jobs:
     name: Reply to relay status comments
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout harness source
-        uses: actions/checkout@v4
-
-      - name: Resolve relay status source
-        id: status-source
+      - name: Resolve checkout target
+        id: checkout-target
         uses: actions/github-script@v7
         with:
           script: |
-            const isPullRequestComment = Boolean(context.payload.issue?.pull_request);
+            const defaultRepository = `${context.repo.owner}/${context.repo.repo}`;
+            core.setOutput("repository", defaultRepository);
+            core.setOutput("ref", context.sha);
 
-            core.setOutput("is_pr", String(isPullRequestComment));
-            core.setOutput("path", ".");
-
-            if (!isPullRequestComment) {
+            if (!context.payload.issue?.pull_request) {
               return;
             }
 
@@ -36,21 +32,16 @@ jobs:
               repo: context.repo.repo,
               pull_number: context.payload.issue.number,
             });
-
             core.setOutput("repository", pull.head.repo.full_name);
             core.setOutput("ref", pull.head.sha);
-            core.setOutput("path", "relay-status-source");
 
-      - name: Checkout PR status source
-        if: ${{ steps.status-source.outputs.is_pr == 'true' }}
+      - name: Checkout status source
         uses: actions/checkout@v4
         with:
-          repository: ${{ steps.status-source.outputs.repository }}
-          ref: ${{ steps.status-source.outputs.ref }}
-          path: ${{ steps.status-source.outputs.path }}
-          persist-credentials: false
+          repository: ${{ steps.checkout-target.outputs.repository }}
+          ref: ${{ steps.checkout-target.outputs.ref }}
 
       - name: Handle /relay status
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python .github/scripts/ai_relay_harness.py "${{ steps.status-source.outputs.path }}"
+        run: python .github/scripts/ai_relay_harness.py

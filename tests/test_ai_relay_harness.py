@@ -76,7 +76,7 @@ def test_status_command_requires_exact_comment_body() -> None:
     assert ai_relay_harness.is_relay_status_comment({"comment": {"body": " /relay status"}}) is False
     assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay status "}}) is False
     assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay start"}}) is False
-    assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay handoff"}}) is False
+    assert ai_relay_harness.is_relay_status_comment({"comment": {"body": "/relay verify"}}) is False
 
 
 def test_start_command_requires_exact_first_line() -> None:
@@ -84,16 +84,16 @@ def test_start_command_requires_exact_first_line() -> None:
     assert ai_relay_harness.is_relay_start_comment({"comment": {"body": "/relay start\ngoal: ship"}}) is True
     assert ai_relay_harness.is_relay_start_comment({"comment": {"body": " /relay start"}}) is False
     assert ai_relay_harness.is_relay_start_comment({"comment": {"body": "/relay start "}}) is False
-    assert ai_relay_harness.is_relay_start_comment({"comment": {"body": "/relay handoff"}}) is False
+    assert ai_relay_harness.is_relay_start_comment({"comment": {"body": "/relay verify"}}) is False
 
 
-def test_handoff_command_requires_exact_first_line() -> None:
-    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay handoff"}}) is True
-    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay handoff\nnote: done"}}) is True
-    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": " /relay handoff"}}) is False
-    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay handoff "}}) is False
-    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay handoff now"}}) is False
-    assert ai_relay_harness.is_relay_handoff_comment({"comment": {"body": "/relay start"}}) is False
+def test_verify_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_verify_comment({"comment": {"body": "/relay verify"}}) is True
+    assert ai_relay_harness.is_relay_verify_comment({"comment": {"body": "/relay verify\nnote: check"}}) is True
+    assert ai_relay_harness.is_relay_verify_comment({"comment": {"body": " /relay verify"}}) is False
+    assert ai_relay_harness.is_relay_verify_comment({"comment": {"body": "/relay verify "}}) is False
+    assert ai_relay_harness.is_relay_verify_comment({"comment": {"body": "/relay verify now"}}) is False
+    assert ai_relay_harness.is_relay_verify_comment({"comment": {"body": "/relay start"}}) is False
 
 
 def test_build_start_state_uses_defaults() -> None:
@@ -143,67 +143,29 @@ def test_start_comment_contains_hidden_state_and_visible_response() -> None:
     assert "goal: demo" in comment
 
 
-def test_build_handoff_state_swaps_claude_to_codex_and_increments_round() -> None:
-    state, previous_agent = ai_relay_harness.build_handoff_state(
-        {
-            "status": "WORKING",
-            "current_agent": "claude",
-            "next_agent": "codex",
-            "round": 0,
-            "goal": "ship relay",
-        }
-    )
-
-    assert previous_agent == "claude"
-    assert state == {
-        "status": "WORKING",
-        "current_agent": "codex",
-        "next_agent": "claude",
-        "round": 1,
-        "goal": "ship relay",
-    }
-
-
-def test_build_handoff_state_swaps_codex_to_claude_and_increments_round() -> None:
-    state, previous_agent = ai_relay_harness.build_handoff_state(
-        {
-            "status": "WORKING",
-            "current_agent": "codex",
-            "next_agent": "claude",
-            "round": 7,
-            "goal": "continue relay",
-        }
-    )
-
-    assert previous_agent == "codex"
-    assert state == {
+def test_verify_comment_contains_hidden_state_and_self_verification_prompt() -> None:
+    state = {
         "status": "WORKING",
         "current_agent": "claude",
         "next_agent": "codex",
-        "round": 8,
-        "goal": "continue relay",
+        "round": 0,
+        "goal": "/relay verify 구현",
+        "scope": "자기검증 프롬프트 생성",
+        "out_of_scope": "실제 AI 호출, skill loading",
+        "done": "verify 댓글이 생성되면 성공",
     }
 
-
-def test_handoff_comment_contains_hidden_state_and_visible_response() -> None:
-    state = {
-        "status": "WORKING",
-        "current_agent": "codex",
-        "next_agent": "claude",
-        "round": 1,
-        "goal": "demo",
-    }
-
-    comment = ai_relay_harness.format_handoff_comment(state, previous_agent="claude")
+    comment = ai_relay_harness.format_verify_comment(state)
 
     assert comment.startswith("<!-- AI_RELAY_STATE\n")
-    assert "\n-->\n\n[AI Relay Handoff]\n" in comment
+    assert "\n-->\n\n[AI Relay Verify]\n" in comment
     assert ai_relay_harness.extract_hidden_state(comment) == state
-    assert "previous_agent: claude" in comment
-    assert "current_agent: codex" in comment
-    assert "next_agent: claude" in comment
-    assert "round: 1" in comment
-    assert "goal: demo" in comment
+    assert "Self-verification prompt:" in comment
+    assert "Goal: /relay verify 구현" in comment
+    assert "Scope: 자기검증 프롬프트 생성" in comment
+    assert "Out of scope: 실제 AI 호출, skill loading" in comment
+    assert "Done condition: verify 댓글이 생성되면 성공" in comment
+    assert "Report PASS or BLOCK" in comment
 
 
 def test_handle_issue_comment_event_posts_status_from_latest_hidden_state(tmp_path: Path) -> None:
@@ -321,15 +283,18 @@ def test_handle_issue_comment_event_starts_relay_with_hidden_state(tmp_path: Pat
     assert "goal: implement start" in body
 
 
-def test_handle_issue_comment_event_handoffs_from_latest_hidden_state(tmp_path: Path) -> None:
-    event_path = write_event(tmp_path, "/relay handoff", issue_number=42)
+def test_handle_issue_comment_event_posts_verify_from_latest_hidden_state(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay verify", issue_number=42)
     hidden_comment = ai_relay_harness.format_hidden_state_comment(
         {
             "status": "WORKING",
             "current_agent": "claude",
             "next_agent": "codex",
             "round": 0,
-            "goal": "handoff goal",
+            "goal": "/relay verify 구현",
+            "scope": "자기검증 프롬프트 생성",
+            "out_of_scope": "실제 AI 호출, skill loading",
+            "done": "verify 댓글이 생성되면 성공",
         }
     )
     posted_comments: list[tuple[str, int, str, str]] = []
@@ -355,21 +320,24 @@ def test_handle_issue_comment_event_handoffs_from_latest_hidden_state(tmp_path: 
     assert (repository, issue_number, token) == ("owner/repo", 42, "token")
     assert ai_relay_harness.extract_hidden_state(body) == {
         "status": "WORKING",
-        "current_agent": "codex",
-        "next_agent": "claude",
-        "round": 1,
-        "goal": "handoff goal",
+        "current_agent": "claude",
+        "next_agent": "codex",
+        "round": 0,
+        "goal": "/relay verify 구현",
+        "scope": "자기검증 프롬프트 생성",
+        "out_of_scope": "실제 AI 호출, skill loading",
+        "done": "verify 댓글이 생성되면 성공",
     }
-    assert "[AI Relay Handoff]\nstatus: WORKING" in body
-    assert "previous_agent: claude" in body
-    assert "current_agent: codex" in body
-    assert "next_agent: claude" in body
-    assert "round: 1" in body
-    assert "goal: handoff goal" in body
+    assert "[AI Relay Verify]\nstatus: WORKING" in body
+    assert "current_agent: claude" in body
+    assert "next_agent: codex" in body
+    assert "goal: /relay verify 구현" in body
+    assert "Self-verification prompt:" in body
+    assert "Report PASS or BLOCK" in body
 
 
-def test_handle_issue_comment_event_handoffs_from_file_or_ready_fallback(tmp_path: Path) -> None:
-    event_path = write_event(tmp_path, "/relay handoff", issue_number=42)
+def test_handle_issue_comment_event_posts_verify_ready_fallback_without_hidden_state(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay verify", issue_number=42)
     posted_comments: list[tuple[str, int, str, str]] = []
 
     def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
@@ -391,75 +359,38 @@ def test_handle_issue_comment_event_handoffs_from_file_or_ready_fallback(tmp_pat
     assert len(posted_comments) == 1
     body = posted_comments[0][2]
     assert ai_relay_harness.extract_hidden_state(body) == {
-        "status": "WORKING",
+        "status": "READY",
         "current_agent": "none",
         "next_agent": "none",
-        "round": 1,
-        "goal": "",
+        "round": 0,
+        "requires_human": False,
     }
+    assert "[AI Relay Verify]" in body
+    assert "status: READY" in body
+    assert "Self-verification prompt:" in body
 
 
-def test_handoff_then_status_reads_latest_handoff_state(tmp_path: Path) -> None:
-    handoff_event_path = write_event(tmp_path, "/relay handoff", issue_number=42)
-    initial_hidden_comment = ai_relay_harness.format_hidden_state_comment(
-        {
-            "status": "WORKING",
-            "current_agent": "claude",
-            "next_agent": "codex",
-            "round": 0,
-            "goal": "status after handoff",
-        }
-    )
+def test_handle_issue_comment_event_ignores_verify_variant(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay verify now")
     posted_comments: list[tuple[str, int, str, str]] = []
 
     def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
         posted_comments.append((repository, issue_number, body, token))
 
-    def list_initial_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
-        return [{"body": initial_hidden_comment}]
-
-    handoff_posted = ai_relay_harness.handle_issue_comment_event(
+    posted = ai_relay_harness.handle_issue_comment_event(
         tmp_path,
-        handoff_event_path,
+        event_path,
         "owner/repo",
         "token",
         post_comment=record_comment,
-        list_comments=list_initial_comments,
     )
 
-    assert handoff_posted is True
-    assert len(posted_comments) == 1
-
-    status_event_path = write_event(tmp_path, "/relay status", issue_number=42)
-
-    def list_handoff_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, object]]:
-        return [{"body": initial_hidden_comment}, {"body": posted_comments[0][2]}]
-
-    status_posted = ai_relay_harness.handle_issue_comment_event(
-        tmp_path,
-        status_event_path,
-        "owner/repo",
-        "token",
-        post_comment=record_comment,
-        list_comments=list_handoff_comments,
-    )
-
-    assert status_posted is True
-    assert posted_comments[-1] == (
-        "owner/repo",
-        42,
-        "[AI Relay Status]\n"
-        "status: WORKING\n"
-        "current_agent: codex\n"
-        "next_agent: claude\n"
-        "round: 1\n"
-        "requires_human: false",
-        "token",
-    )
+    assert posted is False
+    assert posted_comments == []
 
 
-def test_handle_issue_comment_event_ignores_handoff_variant(tmp_path: Path) -> None:
-    event_path = write_event(tmp_path, "/relay handoff now")
+def test_handle_issue_comment_event_ignores_relay_handoff(tmp_path: Path) -> None:
+    event_path = write_event(tmp_path, "/relay handoff")
     posted_comments: list[tuple[str, int, str, str]] = []
 
     def record_comment(repository: str, issue_number: int, body: str, token: str) -> None:
