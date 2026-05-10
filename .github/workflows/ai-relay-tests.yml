@@ -1,0 +1,33 @@
+name: AI Relay Harness Tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/ai_relay_harness.py"
+      - "tests/**"
+      - ".github/workflows/ai-relay-tests.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  harness-tests:
+    name: py_compile and pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Compile harness
+        run: python -m py_compile .github/scripts/ai_relay_harness.py
+
+      - name: Run harness tests
+        run: python -m pytest -q

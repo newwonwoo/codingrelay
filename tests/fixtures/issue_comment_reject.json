@@ -1,0 +1,8 @@
+{
+  "issue": {
+    "number": 42
+  },
+  "comment": {
+    "body": "/relay reject\nreason: 변경 파일 목록 누락"
+  }
+}

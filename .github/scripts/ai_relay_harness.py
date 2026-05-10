@@ -16,6 +16,8 @@ HANDOFF_COMMAND = "/relay handoff"
 PLAN_COMMAND = "/relay plan"
 VERIFY_COMMAND = "/relay verify"
 DISPATCH_COMMAND = "/relay dispatch"
+ACCEPT_COMMAND = "/relay accept"
+REJECT_COMMAND = "/relay reject"
 STATE_FILE = "AI_RELAY_STATE.json"
 STATE_COMMENT_MARKER = "AI_RELAY_STATE"
 PLAN_COMMENT_MARKER = "AI_RELAY_PLAN"
@@ -389,6 +391,16 @@ def is_relay_dispatch_comment(event: Mapping[str, Any]) -> bool:
     return get_command_line(event) == DISPATCH_COMMAND
 
 
+def is_relay_accept_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay accept."""
+    return get_command_line(event) == ACCEPT_COMMAND
+
+
+def is_relay_reject_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay reject."""
+    return get_command_line(event) == REJECT_COMMAND
+
+
 def get_issue_number(event: Mapping[str, Any]) -> int:
     """Return the issue number shared by Issue and PR comment threads."""
     issue = event.get("issue")
@@ -474,6 +486,80 @@ def build_plan(event: Mapping[str, Any]) -> dict[str, Any]:
         "out_of_scope": options.get("out_of_scope", ""),
         "done": options.get("done", ""),
     }
+
+
+def parse_reason_option(event: Mapping[str, Any]) -> str:
+    """Parse the reason value from a relay command comment, if present."""
+    return parse_key_value_options(event, {"reason"}).get("reason", "")
+
+
+def build_accept_state(base_state: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Swap agents and increment round when the receiver accepts the baton."""
+    return build_handoff_state(base_state)
+
+
+def build_reject_state(base_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep current_agent and bump receiver_reject_count when the receiver rejects."""
+    merged_state = merge_status_state(base_state)
+    try:
+        next_reject_count = int(merged_state.get("receiver_reject_count", 0)) + 1
+    except (TypeError, ValueError):
+        next_reject_count = 1
+    return {
+        **dict(merged_state),
+        "status": "REJECTED_BY_RECEIVER",
+        "receiver_reject_count": next_reject_count,
+    }
+
+
+def format_accept_response(previous_agent: str, state: Mapping[str, Any]) -> str:
+    """Format the human-readable relay accept response body."""
+    return "\n".join(
+        [
+            "[AI Relay Accepted]",
+            f"status: {state['status']}",
+            f"previous_agent: {previous_agent}",
+            f"current_agent: {state['current_agent']}",
+            f"next_agent: {state['next_agent']}",
+            f"round: {state['round']}",
+            f"goal: {state.get('goal', '')}",
+        ]
+    )
+
+
+def format_reject_response(state: Mapping[str, Any], reason: str) -> str:
+    """Format the human-readable relay reject response body."""
+    return "\n".join(
+        [
+            "[AI Relay Rejected]",
+            f"status: {state['status']}",
+            f"current_agent: {state['current_agent']}",
+            f"next_agent: {state['next_agent']}",
+            f"round: {state['round']}",
+            f"receiver_reject_count: {state.get('receiver_reject_count', 0)}",
+            f"reason: {reason}",
+            "",
+            "Self-fix prompt:",
+            "Your baton or evidence was rejected by the next agent.",
+            "Do not hand off yet.",
+            f"Reason: {reason or 'unspecified'}",
+            "Required:",
+            "1. Read AI_RELAY_CONTRACT.md, AI_BATON.md, AI_EVIDENCE.md, AI_RISKS.md.",
+            "2. Address the rejection reason without expanding scope.",
+            "3. Update AI_BATON.md, AI_EVIDENCE.md, AI_RISKS.md.",
+            "4. Re-run /relay verify before another handoff attempt.",
+        ]
+    )
+
+
+def format_accept_comment(previous_agent: str, state: Mapping[str, Any]) -> str:
+    """Format the combined hidden state and visible accept response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_accept_response(previous_agent, state)}"
+
+
+def format_reject_comment(state: Mapping[str, Any], reason: str) -> str:
+    """Format the combined hidden state and visible reject response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_reject_response(state, reason)}"
 
 
 def github_api_request(
@@ -583,7 +669,18 @@ def handle_issue_comment_event(
     is_plan = is_relay_plan_comment(event)
     is_verify = is_relay_verify_comment(event)
     is_dispatch = is_relay_dispatch_comment(event)
-    if not is_status and not is_start and not is_handoff and not is_plan and not is_verify and not is_dispatch:
+    is_accept = is_relay_accept_comment(event)
+    is_reject = is_relay_reject_comment(event)
+    if not (
+        is_status
+        or is_start
+        or is_handoff
+        or is_plan
+        or is_verify
+        or is_dispatch
+        or is_accept
+        or is_reject
+    ):
         return False
 
     issue_number = get_issue_number(event)
@@ -597,6 +694,17 @@ def handle_issue_comment_event(
     if is_handoff:
         previous_agent, state = build_handoff_state(resolve_relay_state(repo_root, comments))
         post_comment(repository, issue_number, format_handoff_comment(previous_agent, state), token)
+        return True
+
+    if is_accept:
+        previous_agent, state = build_accept_state(resolve_relay_state(repo_root, comments))
+        post_comment(repository, issue_number, format_accept_comment(previous_agent, state), token)
+        return True
+
+    if is_reject:
+        reason = parse_reason_option(event)
+        state = build_reject_state(resolve_relay_state(repo_root, comments))
+        post_comment(repository, issue_number, format_reject_comment(state, reason), token)
         return True
 
     if is_plan:

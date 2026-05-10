@@ -460,6 +460,154 @@ def test_pr_comment_verify_reads_hidden_state_and_plan(tmp_path: Path) -> None:
     assert "Scope: pr comment dry-run" in thread.last_body
 
 
+def test_accept_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_accept_comment(load_fixture("issue_comment_accept.json")) is True
+    assert ai_relay_harness.is_relay_accept_comment({"comment": {"body": "/relay accept"}}) is True
+    assert ai_relay_harness.is_relay_accept_comment({"comment": {"body": " /relay accept"}}) is False
+    assert ai_relay_harness.is_relay_accept_comment({"comment": {"body": "/relay accept "}}) is False
+    assert ai_relay_harness.is_relay_accept_comment({"comment": {"body": "/relay accept now"}}) is False
+    assert ai_relay_harness.is_relay_accept_comment({"comment": {"body": "/relay reject"}}) is False
+
+
+def test_reject_command_requires_exact_first_line() -> None:
+    assert ai_relay_harness.is_relay_reject_comment(load_fixture("issue_comment_reject.json")) is True
+    assert ai_relay_harness.is_relay_reject_comment({"comment": {"body": "/relay reject"}}) is True
+    assert ai_relay_harness.is_relay_reject_comment({"comment": {"body": " /relay reject"}}) is False
+    assert ai_relay_harness.is_relay_reject_comment({"comment": {"body": "/relay reject "}}) is False
+    assert ai_relay_harness.is_relay_reject_comment({"comment": {"body": "/relay reject now"}}) is False
+    assert ai_relay_harness.is_relay_reject_comment({"comment": {"body": "/relay accept"}}) is False
+
+
+def test_accept_swaps_agents_and_increments_round() -> None:
+    previous_agent, state = ai_relay_harness.build_accept_state(
+        {
+            "status": "RECEIVER_REVIEWING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 0,
+            "goal": "demo",
+        }
+    )
+    assert previous_agent == "claude"
+    assert state["current_agent"] == "codex"
+    assert state["next_agent"] == "claude"
+    assert state["round"] == 1
+    assert state["status"] == "WORKING"
+
+
+def test_reject_keeps_current_agent_and_bumps_reject_count() -> None:
+    state = ai_relay_harness.build_reject_state(
+        {
+            "status": "RECEIVER_REVIEWING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 1,
+            "goal": "demo",
+            "receiver_reject_count": 0,
+        }
+    )
+    assert state["current_agent"] == "claude"
+    assert state["next_agent"] == "codex"
+    assert state["round"] == 1
+    assert state["status"] == "REJECTED_BY_RECEIVER"
+    assert state["receiver_reject_count"] == 1
+
+
+def test_accept_comment_contains_hidden_state_and_visible_response() -> None:
+    previous_agent, state = ai_relay_harness.build_accept_state(
+        {
+            "status": "RECEIVER_REVIEWING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 0,
+            "goal": "demo",
+        }
+    )
+    comment = ai_relay_harness.format_accept_comment(previous_agent, state)
+    assert comment.startswith("<!-- AI_RELAY_STATE\n")
+    assert "\n-->\n\n[AI Relay Accepted]\n" in comment
+    assert "previous_agent: claude" in comment
+    assert "current_agent: codex" in comment
+    assert "round: 1" in comment
+
+
+def test_reject_comment_contains_self_fix_prompt_and_reason() -> None:
+    state = ai_relay_harness.build_reject_state(
+        {
+            "status": "RECEIVER_REVIEWING",
+            "current_agent": "claude",
+            "next_agent": "codex",
+            "round": 1,
+            "goal": "demo",
+            "receiver_reject_count": 0,
+        }
+    )
+    comment = ai_relay_harness.format_reject_comment(state, "변경 파일 목록 누락")
+    assert comment.startswith("<!-- AI_RELAY_STATE\n")
+    assert "\n-->\n\n[AI Relay Rejected]\n" in comment
+    assert "current_agent: claude" in comment
+    assert "receiver_reject_count: 1" in comment
+    assert "reason: 변경 파일 목록 누락" in comment
+    assert "Self-fix prompt:" in comment
+    assert "@claude" not in comment
+    assert "@codex" not in comment
+
+
+def test_start_handoff_accept_then_status_swaps_agents(tmp_path: Path) -> None:
+    thread = CommentThread()
+
+    assert handle_fixture(tmp_path, "issue_comment_start.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_handoff.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_accept.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_status.json", thread) is True
+
+    accept_state = ai_relay_harness.extract_hidden_state(thread.comments[2]["body"])
+    assert accept_state["current_agent"] == "claude"
+    assert accept_state["next_agent"] == "codex"
+    assert accept_state["round"] == 2
+    assert "[AI Relay Accepted]" in thread.comments[2]["body"]
+    assert thread.last_body == (
+        "[AI Relay Status]\n"
+        "status: WORKING\n"
+        "current_agent: claude\n"
+        "next_agent: codex\n"
+        "round: 2\n"
+        "requires_human: false"
+    )
+
+
+def test_start_handoff_reject_then_status_keeps_current_agent(tmp_path: Path) -> None:
+    thread = CommentThread()
+
+    assert handle_fixture(tmp_path, "issue_comment_start.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_handoff.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_reject.json", thread) is True
+    assert handle_fixture(tmp_path, "issue_comment_status.json", thread) is True
+
+    reject_state = ai_relay_harness.extract_hidden_state(thread.comments[2]["body"])
+    assert reject_state["current_agent"] == "codex"
+    assert reject_state["next_agent"] == "claude"
+    assert reject_state["status"] == "REJECTED_BY_RECEIVER"
+    assert reject_state["receiver_reject_count"] == 1
+    assert "reason: 변경 파일 목록 누락" in thread.comments[2]["body"]
+    assert thread.last_body == (
+        "[AI Relay Status]\n"
+        "status: REJECTED_BY_RECEIVER\n"
+        "current_agent: codex\n"
+        "next_agent: claude\n"
+        "round: 1\n"
+        "requires_human: false"
+    )
+
+
+def test_workflow_pull_request_test_gate_runs_pytest() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ai-relay-tests.yml").read_text(encoding="utf-8")
+
+    assert "pull_request:" in workflow
+    assert "py_compile" in workflow
+    assert "pytest" in workflow
+
+
 def test_variant_commands_are_ignored(tmp_path: Path) -> None:
     variants = [
         "/relay start now",
@@ -467,6 +615,8 @@ def test_variant_commands_are_ignored(tmp_path: Path) -> None:
         "/relay plan now",
         "/relay verify now",
         "/relay dispatch now",
+        "/relay accept now",
+        "/relay reject now",
     ]
     for index, body in enumerate(variants):
         thread = CommentThread()
