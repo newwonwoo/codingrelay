@@ -1021,6 +1021,61 @@ def test_handle_event_fix_emits_self_fix_prompt_with_gate_reasons(tmp_path: Path
     assert state["self_fix_count"] == 1
 
 
+def test_kakao_notify_skips_silently_when_no_webhook_url() -> None:
+    sent: list[tuple[str, bytes]] = []
+    sender = lambda url, payload: sent.append((url, payload))  # noqa: E731
+    assert ai_relay_harness.kakao_notify("hi", webhook_url=None, sender=sender) is False
+    assert ai_relay_harness.kakao_notify("hi", webhook_url="", sender=sender) is False
+    assert sent == []
+
+
+def test_kakao_notify_invokes_injected_sender_when_webhook_url_set() -> None:
+    sent: list[tuple[str, bytes]] = []
+    sender = lambda url, payload: sent.append((url, payload))  # noqa: E731
+    assert (
+        ai_relay_harness.kakao_notify(
+            "[AI Relay 차단]\nreason: max_rounds exceeded",
+            webhook_url="https://example.invalid/webhook",
+            sender=sender,
+        )
+        is True
+    )
+    assert len(sent) == 1
+    url, payload = sent[0]
+    assert url == "https://example.invalid/webhook"
+    body = json.loads(payload.decode("utf-8"))
+    assert "차단" in body["text"]
+    assert "max_rounds exceeded" in body["text"]
+
+
+def test_build_start_state_folds_in_limits_from_state_file(tmp_path: Path) -> None:
+    (tmp_path / "AI_RELAY_STATE.json").write_text(
+        json.dumps(
+            {
+                "status": "READY",
+                "current_agent": "none",
+                "next_agent": "none",
+                "round": 0,
+                "max_rounds": 5,
+                "max_self_fix": 4,
+                "max_receiver_reject": 3,
+                "requires_human": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = ai_relay_harness.build_start_state({"comment": {"body": "/relay start"}}, tmp_path)
+    assert state["max_rounds"] == 5
+    assert state["max_self_fix"] == 4
+    assert state["max_receiver_reject"] == 3
+
+
+def test_build_start_state_omits_limits_when_no_state_file(tmp_path: Path) -> None:
+    state = ai_relay_harness.build_start_state({"comment": {"body": "/relay start"}}, tmp_path)
+    assert "max_rounds" not in state
+    assert "max_self_fix" not in state
+
+
 def test_workflow_pull_request_test_gate_runs_pytest() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ai-relay-tests.yml").read_text(encoding="utf-8")
 

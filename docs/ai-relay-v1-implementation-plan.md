@@ -27,6 +27,18 @@ This plan follows `ai_relay_orchestrator_v1.md` and intentionally stays inside t
 7. Built-in code editor.
 8. Model performance scoring.
 
+## Implementation Status (as of 2026-05-10)
+
+| Phase | Status |
+|---|---|
+| 1. Skeleton + workflow | done |
+| 2. Command parser (`status`, `start`, `handoff`, `plan`, `verify`, `dispatch`, `accept`, `reject`, `stop`, `fix`) | done |
+| 3. Prompt renderer (work, self-verification, receiver, self-fix) | done |
+| 4. State machine + `HUMAN_REQUIRED` enforcement | done |
+| 5. Evidence/baton gate (`evaluate_handoff_gate`) auto-attached to `/relay verify` | done |
+| 6. Kakao notification interface (`kakao_notify`) — webhook-driven, silent without `KAKAO_WEBHOOK_URL` | interface only |
+| Regression CI gate (`.github/workflows/ai-relay-tests.yml`) | done |
+
 ## Phase 1 — Skeleton and Harness
 
 Status: implemented in this change.

@@ -493,19 +493,30 @@ def parse_plan_options(event: Mapping[str, Any]) -> dict[str, str]:
     return parse_key_value_options(event, {"goal", "scope", "out_of_scope", "done"})
 
 
-def build_start_state(event: Mapping[str, Any]) -> dict[str, Any]:
-    """Build the initial WORKING relay state for a /relay start comment."""
+def build_start_state(event: Mapping[str, Any], repo_root: Path | str | None = None) -> dict[str, Any]:
+    """Build the initial WORKING relay state for a /relay start comment.
+
+    When repo_root is provided and contains AI_RELAY_STATE.json, the user-set
+    max_rounds / max_self_fix / max_receiver_reject fields are folded into the
+    hidden state so customization persists across comments.
+    """
     options = parse_start_options(event)
     current_agent = options.get("start_agent") or options.get("current_agent") or DEFAULT_START_STATE["current_agent"]
     next_agent = options.get("next_agent") or DEFAULT_START_STATE["next_agent"]
     goal = options.get("goal") or DEFAULT_START_STATE["goal"]
-    return {
+    state: dict[str, Any] = {
         "status": DEFAULT_START_STATE["status"],
         "current_agent": current_agent,
         "next_agent": next_agent,
         "round": DEFAULT_START_STATE["round"],
         "goal": goal,
     }
+    if repo_root is not None:
+        file_state = load_relay_state(repo_root)
+        for limit_key in ("max_rounds", "max_self_fix", "max_receiver_reject"):
+            if limit_key in file_state:
+                state[limit_key] = file_state[limit_key]
+    return state
 
 
 def build_handoff_state(base_state: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -982,7 +993,7 @@ def handle_issue_comment_event(
 
     issue_number = get_issue_number(event)
     if is_start:
-        state = build_start_state(event)
+        state = build_start_state(event, repo_root)
         post_comment(repository, issue_number, format_start_comment(state), token)
         return True
 
@@ -1004,6 +1015,13 @@ def handle_issue_comment_event(
             issue_number,
             format_human_required_comment(locked_state, breaches or ["requires_human flag set."]),
             token,
+        )
+        kakao_notify(
+            "[AI Relay 사람 판단 필요]\n"
+            f"repository: {repository}\n"
+            f"issue/PR: {issue_number}\n"
+            f"reasons: {', '.join(breaches) if breaches else 'requires_human flag set.'}",
+            webhook_url=os.environ.get("KAKAO_WEBHOOK_URL"),
         )
         return True
 
@@ -1056,6 +1074,35 @@ def handle_issue_comment_event(
         return True
 
     return False
+
+
+def kakao_notify(
+    message: str,
+    *,
+    webhook_url: str | None = None,
+    sender: Callable[[str, bytes], Any] | None = None,
+) -> bool:
+    """Send a kakao notification when a webhook is configured; silent no-op otherwise.
+
+    Returns True when a real send is attempted, False when skipped (no webhook).
+    `sender(url, payload_bytes)` is injectable for tests so we never hit the
+    network from the test suite.
+    """
+    if not webhook_url:
+        return False
+    payload = json.dumps({"text": message}, ensure_ascii=False).encode("utf-8")
+    if sender is not None:
+        sender(webhook_url, payload)
+        return True
+    notify_request = request.Request(
+        webhook_url,
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with request.urlopen(notify_request) as _:
+        pass
+    return True
 
 
 def make_dry_run_post_comment(summary_path: Path | None = None) -> Callable[[str, int, str, str], None]:

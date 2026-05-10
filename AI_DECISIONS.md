@@ -18,6 +18,12 @@
 - Reason: The requested boundary is automatic-call-preparation, not actual agent invocation.
 - Consequence: Humans can review/copy the generated dispatch prompt before any later automation step adds live mentions.
 
+## 2026-05-10 — Stage 1-5: V1 Surface Completion
+
+- Decision: Land the remaining V1 commands (`accept`, `reject`, `stop`, `fix`), the automated baton/evidence gate, the limit-breach `HUMAN_REQUIRED` transition, the kakao notification interface, and the regression CI gate as five sequential commits, each with its own tests.
+- Reason: Each stage's diff stays reviewable in isolation; if a regression is found later, `git bisect` lands on a single stage. Public signatures stay stable across stages so the test suite grows monotonically (26→35→47→56→65→69) without churning earlier assertions.
+- Consequence: V1 of `ai_relay_orchestrator_v1.md` §24 is met except for live kakao delivery (interface only — opt-in via `KAKAO_WEBHOOK_URL`). Tragic-failure audit findings that needed more design (network retry, hidden-state hijack guard, DONE→start round continuity, code-block marker collision) are documented as Risks 7-10 for the next round.
+
 ## 2026-05-10 — Adopt f29e3c2 As Base For Merge Conflict Recovery
 
 - Decision: After PR #16's bad merge left both `ai_relay_harness.py` and `test_ai_relay_harness.py` un-importable, restore both files verbatim from commit `f29e3c2` ("Add relay dispatch prompt command") rather than hand-merging `f29e3c2` and `0c6e662` ("Add relay dry-run fixture tests") in one round.

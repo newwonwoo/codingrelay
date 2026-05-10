@@ -44,4 +44,5 @@ jobs:
       - name: Handle relay comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KAKAO_WEBHOOK_URL: ${{ secrets.KAKAO_WEBHOOK_URL }}
         run: python .github/scripts/ai_relay_harness.py

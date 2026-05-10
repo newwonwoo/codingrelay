@@ -87,6 +87,32 @@
 ### Not Verified
 - Live GitHub comment creation for `/relay plan` or `/relay dispatch` after pushing to GitHub.
 
+## 2026-05-10 V1 Stages 1-5
+
+### Commands Run
+- `python3 -m py_compile .github/scripts/ai_relay_harness.py`
+- `python3 -m pytest -q`
+
+### Results
+- `py_compile` exit 0 at the end of every stage.
+- `pytest -q` cumulative growth: 26 → 35 (Stage 1) → 47 (Stage 2) → 56 (Stage 3) → 65 (Stage 4) → 69 (Stage 5).
+- Final run: `69 passed in 0.37s`.
+- `test_repo_baton_and_evidence_pass_their_own_gate` is green, meaning this repo's own `AI_BATON.md` and `AI_EVIDENCE.md` clear the new automated handoff gate.
+
+### Failed Tests
+- None.
+
+### Logs
+- `69 passed in 0.37s`
+
+### Screenshots / Runtime Evidence
+- Not applicable for stdlib-only Python harness.
+
+### Not Verified
+- Live GitHub Actions execution of `.github/workflows/ai-relay-tests.yml` on a real PR (no `gh` CLI in this container).
+- Live kakao delivery — `kakao_notify` only exercised via injected sender; real `urlopen` POST is not invoked from the test suite.
+- Long-form fault injection for Risks 7-10; these remain documented but unfixed in this round.
+
 ## 2026-05-10 PR #16 Merge Conflict Recovery
 
 ### Commands Run
