@@ -18,6 +18,12 @@
 - Reason: The requested boundary is automatic-call-preparation, not actual agent invocation.
 - Consequence: Humans can review/copy the generated dispatch prompt before any later automation step adds live mentions.
 
+## 2026-05-10 — Stage 6: Land Risks 7-10 Fixes In One Round
+
+- Decision: Implement all four deferred risks (network retry, hidden-state hijack guard, DONE→start continuity, code-block marker collision) in a single round with their tests, since the prototype is still pre-formal.
+- Reason: Each risk's fix is localized and testable in isolation; bundling them avoids four separate review cycles for a project still in V1.
+- Consequence: 11 new tests, public signatures unchanged, 80 total tests passing. Risk 11 (kakao network failure cascading to red workflow) was identified during this stage and deferred since no test exercises the live network path.
+
 ## 2026-05-10 — Stage 1-5: V1 Surface Completion
 
 - Decision: Land the remaining V1 commands (`accept`, `reject`, `stop`, `fix`), the automated baton/evidence gate, the limit-breach `HUMAN_REQUIRED` transition, the kakao notification interface, and the regression CI gate as five sequential commits, each with its own tests.

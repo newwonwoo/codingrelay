@@ -273,6 +273,27 @@ def format_start_comment(state: Mapping[str, Any]) -> str:
     return f"{format_hidden_state_comment(state)}\n\n{format_start_response(state)}"
 
 
+def format_start_blocked_response(prior_state: Mapping[str, Any]) -> str:
+    """Format the visible body for a /relay start that was refused due to DONE state."""
+    merged = merge_status_state(prior_state)
+    return "\n".join(
+        [
+            "[AI Relay Start Blocked]",
+            "Latest hidden state on this thread is DONE.",
+            f"prior_round: {merged['round']}",
+            f"prior_status: {merged['status']}",
+            "",
+            "Action: include `force: true` in your /relay start comment to start a new task on this thread.",
+            "Counters from the prior session will be carried forward unless you also reset them in AI_RELAY_STATE.json.",
+        ]
+    )
+
+
+def format_start_blocked_comment(prior_state: Mapping[str, Any]) -> str:
+    """Hidden-state + visible response for a refused start."""
+    return f"{format_hidden_state_comment(prior_state)}\n\n{format_start_blocked_response(prior_state)}"
+
+
 def format_handoff_comment(previous_agent: str, state: Mapping[str, Any]) -> str:
     """Format the combined hidden state and visible handoff response comment."""
     return f"{format_hidden_state_comment(state)}\n\n{format_handoff_response(previous_agent, state)}"
@@ -308,13 +329,31 @@ def format_dispatch_comment(state: Mapping[str, Any], plan: Mapping[str, Any] | 
 
 
 def extract_hidden_json(comment_body: str, marker: str) -> dict[str, Any] | None:
-    """Extract a hidden JSON object from a comment body for the requested marker."""
+    """Extract a hidden JSON object from a comment body for the requested marker.
+
+    The marker line must start at column 0 and not be inside a fenced code
+    block. This guards against pasted documentation snippets in the body
+    poisoning relay state (Risk 10).
+    """
     start_marker = f"<!-- {marker}"
-    start_index = comment_body.find(start_marker)
-    if start_index == -1:
+    lines = comment_body.splitlines(keepends=True)
+    in_fence = False
+    cursor = 0
+    marker_start: int | None = None
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            cursor += len(line)
+            continue
+        if not in_fence and line.startswith(start_marker):
+            marker_start = cursor
+            break
+        cursor += len(line)
+    if marker_start is None:
         return None
 
-    json_start = start_index + len(start_marker)
+    json_start = marker_start + len(start_marker)
     end_index = comment_body.find("-->", json_start)
     if end_index == -1:
         return None
@@ -339,16 +378,51 @@ def extract_hidden_plan(comment_body: str) -> dict[str, Any] | None:
     return extract_hidden_json(comment_body, PLAN_COMMENT_MARKER)
 
 
+def _was_edited(comment: Mapping[str, Any]) -> bool:
+    """Return True when a GitHub comment payload shows it was edited after creation."""
+    created = comment.get("created_at")
+    updated = comment.get("updated_at")
+    if isinstance(created, str) and isinstance(updated, str):
+        return updated != created
+    return False
+
+
 def latest_hidden_payload(
     comments: Sequence[Mapping[str, Any]],
     extractor: Callable[[str], dict[str, Any] | None],
 ) -> dict[str, Any] | None:
-    """Return the newest hidden payload from issue comments, if present."""
-    for comment in reversed(comments):
+    """Return the newest hidden payload from issue comments, if present.
+
+    Prefers the GitHub comment with the highest numeric `id` (creation order)
+    over reverse-iteration so that an attacker editing an old comment cannot
+    hijack the "latest" hidden marker. Edited comments are skipped entirely
+    when both `created_at` and `updated_at` are present and differ. Falls back
+    to reverse-iteration when no `id` fields are available (test fixtures).
+    """
+    candidates: list[tuple[int, Mapping[str, Any]]] = []
+    sortable = True
+    for comment in comments:
         body = comment.get("body")
         if not isinstance(body, str):
             continue
-        payload = extractor(body)
+        if _was_edited(comment):
+            continue
+        comment_id = comment.get("id")
+        if isinstance(comment_id, int):
+            candidates.append((comment_id, comment))
+        else:
+            sortable = False
+            candidates.append((0, comment))
+    if sortable and candidates:
+        candidates.sort(key=lambda pair: pair[0], reverse=True)
+        for _, comment in candidates:
+            payload = extractor(comment["body"])  # type: ignore[arg-type]
+            if payload is not None:
+                return payload
+        return None
+    # Fallback: reverse-iteration over original order when no id available.
+    for _, comment in reversed(candidates):
+        payload = extractor(comment["body"])  # type: ignore[arg-type]
         if payload is not None:
             return payload
     return None
@@ -484,8 +558,8 @@ def parse_key_value_options(event: Mapping[str, Any], allowed_keys: set[str]) ->
 
 
 def parse_start_options(event: Mapping[str, Any]) -> dict[str, str]:
-    """Parse start_agent, next_agent, and goal values from a start comment."""
-    return parse_key_value_options(event, {"start_agent", "current_agent", "next_agent", "goal"})
+    """Parse start_agent, next_agent, goal, and force values from a start comment."""
+    return parse_key_value_options(event, {"start_agent", "current_agent", "next_agent", "goal", "force"})
 
 
 def parse_plan_options(event: Mapping[str, Any]) -> dict[str, str]:
@@ -493,12 +567,21 @@ def parse_plan_options(event: Mapping[str, Any]) -> dict[str, str]:
     return parse_key_value_options(event, {"goal", "scope", "out_of_scope", "done"})
 
 
-def build_start_state(event: Mapping[str, Any], repo_root: Path | str | None = None) -> dict[str, Any]:
+def build_start_state(
+    event: Mapping[str, Any],
+    repo_root: Path | str | None = None,
+    prior_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build the initial WORKING relay state for a /relay start comment.
 
     When repo_root is provided and contains AI_RELAY_STATE.json, the user-set
     max_rounds / max_self_fix / max_receiver_reject fields are folded into the
     hidden state so customization persists across comments.
+
+    When prior_state is provided (i.e. there is already a hidden state from a
+    previous run on this thread), prior round / self_fix_count /
+    receiver_reject_count totals carry forward so a stop-then-restart cycle
+    does not silently reset stop-control invariants (Risk 9).
     """
     options = parse_start_options(event)
     current_agent = options.get("start_agent") or options.get("current_agent") or DEFAULT_START_STATE["current_agent"]
@@ -511,12 +594,24 @@ def build_start_state(event: Mapping[str, Any], repo_root: Path | str | None = N
         "round": DEFAULT_START_STATE["round"],
         "goal": goal,
     }
+    if prior_state is not None:
+        for carry_key in ("round", "self_fix_count", "receiver_reject_count"):
+            if carry_key in prior_state:
+                state[carry_key] = prior_state[carry_key]
+        for limit_key in ("max_rounds", "max_self_fix", "max_receiver_reject"):
+            if limit_key in prior_state:
+                state[limit_key] = prior_state[limit_key]
     if repo_root is not None:
         file_state = load_relay_state(repo_root)
         for limit_key in ("max_rounds", "max_self_fix", "max_receiver_reject"):
-            if limit_key in file_state:
+            if limit_key in file_state and limit_key not in state:
                 state[limit_key] = file_state[limit_key]
     return state
+
+
+def is_force_start(event: Mapping[str, Any]) -> bool:
+    """Return True when /relay start carries `force: true`."""
+    return parse_start_options(event).get("force", "").strip().lower() == "true"
 
 
 def build_handoff_state(base_state: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -866,13 +961,29 @@ def format_fix_comment(state: Mapping[str, Any], reasons: Sequence[str]) -> str:
     return f"{format_hidden_state_comment(state)}\n\n{format_fix_response(state, reasons)}"
 
 
+GITHUB_API_RETRY_BACKOFF: tuple[float, ...] = (2.0, 4.0, 8.0)
+
+
 def github_api_request(
     url: str,
     token: str,
     method: str = "GET",
     data: bytes | None = None,
+    *,
+    backoff: Sequence[float] = GITHUB_API_RETRY_BACKOFF,
+    sleeper: Callable[[float], None] | None = None,
+    opener: Callable[[Any], Any] | None = None,
 ) -> Any:
-    """Call the GitHub API and decode a JSON response."""
+    """Call the GitHub API and decode a JSON response with retry/backoff.
+
+    Retries on URLError, HTTPError 5xx, and HTTPError 429. Non-retryable
+    HTTP errors (4xx other than 429) and a final retry exhaustion are
+    re-raised as RelayHarnessError so callers can surface a single visible
+    error comment instead of a workflow stack trace.
+    """
+    import time
+    from urllib.error import HTTPError, URLError
+
     github_request = request.Request(
         url,
         data=data,
@@ -884,11 +995,35 @@ def github_api_request(
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with request.urlopen(github_request) as response:
-        response_body = response.read()
-    if not response_body:
-        return None
-    return json.loads(response_body.decode("utf-8"))
+    sleep = sleeper if sleeper is not None else time.sleep
+    open_request = opener if opener is not None else request.urlopen
+    delays = list(backoff)
+    attempts = len(delays) + 1
+    last_error: Exception | None = None
+    for attempt_index in range(attempts):
+        try:
+            with open_request(github_request) as response:
+                response_body = response.read()
+            if not response_body:
+                return None
+            return json.loads(response_body.decode("utf-8"))
+        except HTTPError as exc:  # pragma: no cover - network status branches
+            last_error = exc
+            retryable = exc.code == 429 or 500 <= exc.code < 600
+            if not retryable or attempt_index == attempts - 1:
+                raise RelayHarnessError(
+                    f"GitHub API {method} {url} failed with HTTP {exc.code}: {exc.reason}"
+                ) from exc
+        except URLError as exc:  # pragma: no cover - network branch
+            last_error = exc
+            if attempt_index == attempts - 1:
+                raise RelayHarnessError(
+                    f"GitHub API {method} {url} failed with network error: {exc.reason}"
+                ) from exc
+        if attempt_index < len(delays):
+            sleep(delays[attempt_index])
+    # Should be unreachable, but keep mypy happy.
+    raise RelayHarnessError(f"GitHub API {method} {url} exhausted retries: {last_error}")
 
 
 def list_issue_comments(
@@ -993,7 +1128,21 @@ def handle_issue_comment_event(
 
     issue_number = get_issue_number(event)
     if is_start:
-        state = build_start_state(event, repo_root)
+        comments = list_comments(repository, issue_number, token)
+        prior_state = latest_hidden_state(comments)
+        if (
+            prior_state is not None
+            and prior_state.get("status") == "DONE"
+            and not is_force_start(event)
+        ):
+            post_comment(
+                repository,
+                issue_number,
+                format_start_blocked_comment(prior_state),
+                token,
+            )
+            return True
+        state = build_start_state(event, repo_root, prior_state)
         post_comment(repository, issue_number, format_start_comment(state), token)
         return True
 
@@ -1203,10 +1352,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except (OSError, json.JSONDecodeError, RelayHarnessError) as exc:
         print(str(exc))
+        if not args.dry_run:
+            _try_post_error_comment(args, str(exc))
         return 1
 
     print("AI relay comment posted." if posted else "No supported relay command found.")
     return 0
+
+
+def _try_post_error_comment(args: argparse.Namespace, message: str) -> None:
+    """Best-effort attempt to leave a single [AI Relay Error] comment.
+
+    Used when the main path raises after we already know the issue/PR
+    number, so users see a visible failure instead of a silent CI red X
+    (Risk 7 mitigation).
+    """
+    if not args.token or not args.repository or not args.event_path:
+        return
+    try:
+        event = load_github_event(args.event_path)
+        issue_number = get_issue_number(event)
+        body = "\n".join(
+            [
+                "[AI Relay Error]",
+                "The relay harness could not complete this request.",
+                f"Reason: {message}",
+                "",
+                "Action: re-run the workflow once the underlying issue clears, or run /relay status to see the last known state.",
+            ]
+        )
+        post_issue_comment(args.repository, issue_number, body, args.token)
+    except Exception:  # pragma: no cover - best-effort path
+        return
 
 
 if __name__ == "__main__":

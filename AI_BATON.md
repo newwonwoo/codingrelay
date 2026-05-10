@@ -118,13 +118,33 @@
   `<!-- AI_RELAY_PLAN`) without a migration path; old comments must remain
   parseable.
 
+## Stage 6 Addendum (Risks 7-10 landed)
+
+- `github_api_request` retries on URLError, HTTP 429, and HTTP 5xx with
+  2s/4s/8s backoff. On exhaustion or non-retryable HTTP errors raises
+  `RelayHarnessError`; `main()` catches it and best-effort posts an
+  `[AI Relay Error]` comment so the user sees a visible failure.
+- `latest_hidden_payload` prefers the GitHub comment with the highest
+  numeric `id` (creation order) and skips comments where
+  `created_at != updated_at`. Test fixtures without `id` keep working
+  via reverse-iteration fallback.
+- `/relay start` refuses to run when the latest hidden state is `DONE`
+  unless the comment includes `force: true`. With `force: true`,
+  `build_start_state` carries forward `round`, `self_fix_count`,
+  `receiver_reject_count`, and `max_*` from the prior state.
+- `extract_hidden_json` requires the marker to start at column 0 and
+  not be inside a fenced code block.
+- New Risk 11 documented (kakao webhook unreachable cascading to red
+  workflow). Code path exists but no try/except guard yet.
+- Test count: 80 passing. py_compile clean.
+
 ## Next Actions
-- Address Risk 7 (network retry/error comment) and Risk 10 (code-block
-  marker collision) — both are localized and low-risk.
-- Optional: Risk 9 (DONE state continuity) once the team agrees on the
-  desired behavior.
+- Risk 11 (kakao notify failure isolation) — wrap the call in
+  HUMAN_REQUIRED branch with try/except.
 - Optional: live kakao webhook smoke test once a webhook secret is
   provisioned in repo settings.
+- Optional: live GitHub Actions retry-path verification once the PR is
+  exercised on a flaky-API window.
 
 ## Handoff Status
 PASS

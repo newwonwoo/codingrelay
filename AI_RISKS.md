@@ -41,21 +41,26 @@
 - Fix: Resolved in Stage 1 — `.github/workflows/ai-relay-tests.yml` runs `py_compile` and `pytest -q` on every PR + push to main.
 
 ### Risk 7
-- Problem: `github_api_request` (`urlopen`) does not catch `HTTPError`/`URLError`/timeout. A transient GitHub API failure during `list_issue_comments` or `post_issue_comment` will surface as an uncaught exception, which the workflow turns into a job failure but no useful comment.
-- Future Symptom: Six months in, a flaky GitHub API window will cause `/relay` commands to appear silently broken — no comment posted, only a red CI check.
-- Fix: Wrap `github_api_request` callers in retry-with-backoff (3 tries, 2s/4s/8s) and post a short `[AI Relay Error]` comment when retries are exhausted, so the user sees what happened.
+- Problem: `github_api_request` (`urlopen`) did not catch `HTTPError`/`URLError`/timeout. A transient GitHub API failure during `list_issue_comments` or `post_issue_comment` surfaced as an uncaught exception, which the workflow turned into a job failure with no useful comment.
+- Future Symptom: A flaky GitHub API window would have caused `/relay` commands to appear silently broken — no comment posted, only a red CI check.
+- Fix (Stage 6 — landed): `github_api_request` now retries on `URLError`, HTTP 429, and HTTP 5xx with a 2s/4s/8s backoff (overridable via `backoff=`/`sleeper=`/`opener=` for tests). On exhaustion or non-retryable errors it raises `RelayHarnessError`. `main()` catches that and best-effort posts a single `[AI Relay Error]` comment with the reason, so users see a visible failure.
 
 ### Risk 8
-- Problem: `latest_hidden_state` / `latest_hidden_plan` walk the comment list in reverse and return the newest hidden marker. A user (or a malicious actor with comment-edit rights) can edit an old comment to insert a hidden marker block, hijacking the "latest" detection.
-- Future Symptom: Relay state silently rolls back to a stale or attacker-controlled value without any visible indication.
-- Fix: Track each hidden marker's GitHub `comment.id` and prefer the highest `id` over reverse-iteration; reject markers found in edited comments where `created_at != updated_at` unless explicitly allowed.
+- Problem: `latest_hidden_state` / `latest_hidden_plan` walked the comment list in reverse and returned the first hidden marker found. A user (or a malicious actor with comment-edit rights) could edit an old comment to insert a hidden marker block, hijacking the "latest" detection.
+- Future Symptom: Relay state would silently roll back to a stale or attacker-controlled value with no visible indication.
+- Fix (Stage 6 — landed): `latest_hidden_payload` now prefers the GitHub comment with the highest numeric `id` (creation order) over reverse-iteration, and skips comments whose `updated_at != created_at`. Test fixtures without `id` fields fall back to reverse-iteration to preserve existing behavior.
 
 ### Risk 9
-- Problem: After `/relay stop` sets `status=DONE`, a subsequent `/relay start` builds a fresh hidden state with `round=0` and no link to the prior session. Round/self_fix/receiver_reject history is lost.
-- Future Symptom: A second pass on the same task starts with full limits available, defeating the stop-control invariant for tasks that should be considered exhausted.
-- Fix: Carry over `task_id` and the previous `round` totals into the new hidden state, or refuse `/relay start` while the latest hidden state is `DONE` unless the user includes `force: true`.
+- Problem: After `/relay stop` set `status=DONE`, a subsequent `/relay start` built a fresh hidden state with `round=0` and no link to the prior session. Round / self_fix_count / receiver_reject_count history was lost.
+- Future Symptom: A second pass on the same task started with full limits available, defeating the stop-control invariant for tasks that should be considered exhausted.
+- Fix (Stage 6 — landed): When the latest hidden state is `DONE`, `/relay start` is refused unless the comment includes `force: true`; the response is `[AI Relay Start Blocked]`. With `force: true`, `build_start_state` carries forward `round`, `self_fix_count`, `receiver_reject_count`, and `max_*` from the prior state into the new hidden state.
 
 ### Risk 10
-- Problem: `extract_hidden_json` matches the literal string `<!-- AI_RELAY_STATE` anywhere in the body. A user pasting an example hidden marker inside a fenced code block in a comment will be parsed as real state.
-- Future Symptom: Documentation, debugging tutorials, or test fixtures pasted into a real PR comment can poison the hidden state and corrupt routing.
-- Fix: Require the marker to be at the top of the comment (or at column 0) and add a regression test for code-block-fenced markers being ignored.
+- Problem: `extract_hidden_json` matched the literal string `<!-- AI_RELAY_STATE` anywhere in the body. A user pasting an example hidden marker inside a fenced code block was parsed as real state.
+- Future Symptom: Documentation, debugging tutorials, or test fixtures pasted into a real PR comment could poison the hidden state and corrupt routing.
+- Fix (Stage 6 — landed): `extract_hidden_json` requires the marker line to start at column 0 and not be inside a ```` ``` ```` or `~~~` fenced code block. Regression tests assert that fenced and indented markers are ignored while canonical markers still parse.
+
+### Risk 11
+- Problem: When the kakao webhook is configured but the operator on call has no internet connectivity, `kakao_notify` will raise on `urlopen` and bubble up to `main()`. Since the HUMAN_REQUIRED short-circuit currently calls `kakao_notify` *after* posting the GitHub comment, the GitHub comment is preserved, but the workflow run still ends red.
+- Future Symptom: A team that monitors red workflow runs will get a false positive every time the webhook host is unreachable, even though the relay state was successfully persisted.
+- Fix: Wrap the kakao_notify call in the HUMAN_REQUIRED branch with a try/except that logs but does not re-raise. Defer to a follow-up since current tests do not exercise the network path.

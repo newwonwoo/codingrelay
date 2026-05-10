@@ -87,6 +87,34 @@
 ### Not Verified
 - Live GitHub comment creation for `/relay plan` or `/relay dispatch` after pushing to GitHub.
 
+## 2026-05-10 Stage 6: Risks 7-10 Fixes
+
+### Commands Run
+- `python3 -m py_compile .github/scripts/ai_relay_harness.py`
+- `python3 -m pytest -q`
+
+### Results
+- Risk 7 (network retry + visible error comment): `github_api_request` retries on URLError/429/5xx with injectable backoff/sleeper/opener; `main()` posts `[AI Relay Error]` on `RelayHarnessError`.
+- Risk 8 (hidden-state hijack guard): `latest_hidden_payload` prefers highest comment id, skips edited comments, falls back to reverse-iteration without id fields.
+- Risk 9 (DONE→start continuity): `/relay start` blocked while latest hidden state is DONE unless `force: true`; counters carry forward via `prior_state` argument.
+- Risk 10 (code-block marker collision): `extract_hidden_json` requires column-0 marker outside fenced code blocks.
+- Pytest cumulative growth: 69 → 80. Final run: `80 passed in 0.32s`.
+- Risk 11 newly identified during this stage (kakao network failure cascading to red workflow); deferred.
+
+### Failed Tests
+- None.
+
+### Logs
+- `80 passed in 0.32s`
+
+### Screenshots / Runtime Evidence
+- Not applicable for stdlib-only Python harness.
+
+### Not Verified
+- Live GitHub API retry path (no network access from this container; tests use injected opener/sleeper).
+- Live kakao webhook delivery during HUMAN_REQUIRED.
+- Risk 11 (kakao network failure mid-page) — code path exists but no try/except guard yet.
+
 ## 2026-05-10 V1 Stages 1-5
 
 ### Commands Run
