@@ -34,3 +34,8 @@
 - Problem: `/relay dispatch` renders a prompt from hidden state and hidden plan but does not validate plan completeness beyond defaults.
 - Future Symptom: A dispatch comment may be syntactically valid but too vague if goal, scope, or done are empty.
 - Fix: Add explicit BLOCK/HUMAN_REQUIRED validation once prompt rendering is stable.
+
+### Risk 6
+- Problem: PR #16 merged into `main` with both `.github/scripts/ai_relay_harness.py` and `tests/test_ai_relay_harness.py` left in a SyntaxError state — duplicated function definitions and stray `return` statements from a manual conflict resolution. No CI gate catches this because the workflow does not run `py_compile` or `pytest` on PRs.
+- Future Symptom: Any future hand-resolved merge between two relay feature branches can land on `main` with the harness un-importable; `/relay` commands silently fail in the workflow with no obvious signal until a user looks at the Action logs.
+- Fix: Add a required PR check that runs `python3 -m py_compile .github/scripts/ai_relay_harness.py` and `python3 -m pytest -q` on every pull request targeting `main`.

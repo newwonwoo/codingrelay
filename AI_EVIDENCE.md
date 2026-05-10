@@ -87,6 +87,33 @@
 ### Not Verified
 - Live GitHub comment creation for `/relay plan` or `/relay dispatch` after pushing to GitHub.
 
+## 2026-05-10 PR #16 Merge Conflict Recovery
+
+### Commands Run
+- `python3 -m py_compile .github/scripts/ai_relay_harness.py`
+- `python3 -m pytest -q`
+- `git show f29e3c2:.github/scripts/ai_relay_harness.py > .github/scripts/ai_relay_harness.py`
+- `git show f29e3c2:tests/test_ai_relay_harness.py > tests/test_ai_relay_harness.py`
+
+### Results
+- Before recovery: harness file failed `py_compile` at line 163 (stray `return` outside any function, plus duplicated function definitions left by PR #16's bad merge resolution).
+- After restoring both files from commit `f29e3c2`: `py_compile` exit 0, pytest reports `26 passed in 0.20s`.
+- No other files modified for the recovery itself (state/baton/risks/decisions updates are bookkeeping per CLAUDE.md, not code changes).
+
+### Failed Tests
+- None after recovery.
+- Before recovery: every test failed at module-import time with SyntaxError.
+
+### Logs
+- `26 passed in 0.20s`
+
+### Screenshots / Runtime Evidence
+- Not applicable for this Python harness change.
+
+### Not Verified
+- Live GitHub Actions run after pushing `claude/ai-relay-development-XEceg` (no `gh` CLI in this environment, as documented in earlier evidence sections).
+- Whether codex's intended `0c6e662` dry-run CLI path needs to be re-added — explicitly deferred to next round.
+
 ## 2026-05-10 Relay Dispatch Command Support
 
 ### Commands Run

@@ -17,3 +17,9 @@
 - Decision: `/relay dispatch` renders a prompt addressed to the current agent by plain name and intentionally omits `@claude`/`@codex` mentions.
 - Reason: The requested boundary is automatic-call-preparation, not actual agent invocation.
 - Consequence: Humans can review/copy the generated dispatch prompt before any later automation step adds live mentions.
+
+## 2026-05-10 — Adopt f29e3c2 As Base For Merge Conflict Recovery
+
+- Decision: After PR #16's bad merge left both `ai_relay_harness.py` and `test_ai_relay_harness.py` un-importable, restore both files verbatim from commit `f29e3c2` ("Add relay dispatch prompt command") rather than hand-merging `f29e3c2` and `0c6e662` ("Add relay dry-run fixture tests") in one round.
+- Reason: `f29e3c2`'s design (separate `AI_RELAY_PLAN` hidden marker, `format_dispatch_comment(state, plan)` signature) matches what `AI_BATON.md`, `AI_DECISIONS.md`, and the existing `tests/fixtures/issue_comment_dispatch.json` already document as the intended direction. Smallest safe change per `AGENTS.md`. The dry-run CLI from `0c6e662` is purely additive and can be re-introduced cleanly on top of this base in a follow-up round.
+- Consequence: The `--dry-run`, `--comments-path`, `--summary` flags from `0c6e662` are temporarily absent from `main`. Anyone who relied on the local dry-run path must wait for the follow-up round or invoke the harness via the GitHub Actions workflow path.
