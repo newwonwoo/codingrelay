@@ -13,6 +13,8 @@ from urllib import parse, request
 STATUS_COMMAND = "/relay status"
 START_COMMAND = "/relay start"
 VERIFY_COMMAND = "/relay verify"
+PLAN_COMMAND = "/relay plan"
+DISPATCH_COMMAND = "/relay dispatch"
 STATE_FILE = "AI_RELAY_STATE.json"
 STATE_COMMENT_MARKER = "AI_RELAY_STATE"
 
@@ -113,6 +115,34 @@ def format_verify_prompt(state: Mapping[str, Any]) -> str:
     )
 
 
+def format_dispatch_prompt(state: Mapping[str, Any]) -> str:
+    """Build a work-dispatch prompt without calling or mentioning an AI provider."""
+    goal = state.get("goal", "")
+    scope = state.get("scope", "")
+    out_of_scope = state.get("out_of_scope", "")
+    done = state.get("done", "")
+    return "\n".join(
+        [
+            "Dispatch prompt:",
+            "You are the current relay agent. Continue the work using the relay state and plan below.",
+            f"Status: {state.get('status', '')}",
+            f"Current agent: {state.get('current_agent', '')}",
+            f"Next agent: {state.get('next_agent', '')}",
+            f"Round: {state.get('round', '')}",
+            f"Goal: {goal}",
+            f"Scope: {scope}",
+            f"Out of scope: {out_of_scope}",
+            f"Done condition: {done}",
+            "Instructions:",
+            "1. Read the relay contract and evidence files before changing code.",
+            "2. Make the smallest safe change inside scope.",
+            "3. Do not perform provider calls, skill loading, or unrelated automation.",
+            "4. Run relevant tests or explain any environment limitation.",
+            "5. Update relay evidence before handoff.",
+        ]
+    )
+
+
 def format_verify_response(state: Mapping[str, Any]) -> str:
     """Format the human-readable relay verify response body."""
     merged_state = merge_status_state(state)
@@ -126,6 +156,41 @@ def format_verify_response(state: Mapping[str, Any]) -> str:
             f"goal: {state.get('goal', '')}",
             "",
             format_verify_prompt(state),
+        ]
+    )
+
+
+def format_plan_response(state: Mapping[str, Any]) -> str:
+    """Format the human-readable relay plan response body."""
+    merged_state = merge_status_state(state)
+    return "\n".join(
+        [
+            "[AI Relay Plan]",
+            f"status: {merged_state['status']}",
+            f"current_agent: {merged_state['current_agent']}",
+            f"next_agent: {merged_state['next_agent']}",
+            f"round: {merged_state['round']}",
+            f"goal: {state.get('goal', '')}",
+            f"scope: {state.get('scope', '')}",
+            f"out_of_scope: {state.get('out_of_scope', '')}",
+            f"done: {state.get('done', '')}",
+        ]
+    )
+
+
+def format_dispatch_response(state: Mapping[str, Any]) -> str:
+    """Format the human-readable relay dispatch response body."""
+    merged_state = merge_status_state(state)
+    return "\n".join(
+        [
+            "[AI Relay Dispatch]",
+            f"status: {merged_state['status']}",
+            f"current_agent: {merged_state['current_agent']}",
+            f"next_agent: {merged_state['next_agent']}",
+            f"round: {merged_state['round']}",
+            f"goal: {state.get('goal', '')}",
+            "",
+            format_dispatch_prompt(state),
         ]
     )
 
@@ -144,6 +209,16 @@ def format_start_comment(state: Mapping[str, Any]) -> str:
 def format_verify_comment(state: Mapping[str, Any]) -> str:
     """Format the combined hidden state and visible verify response comment."""
     return f"{format_hidden_state_comment(state)}\n\n{format_verify_response(state)}"
+
+
+def format_plan_comment(state: Mapping[str, Any]) -> str:
+    """Format the combined hidden state and visible plan response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_plan_response(state)}"
+
+
+def format_dispatch_comment(state: Mapping[str, Any]) -> str:
+    """Format the combined hidden state and visible dispatch response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_dispatch_response(state)}"
 
 
 def extract_hidden_state(comment_body: str) -> dict[str, Any] | None:
@@ -222,6 +297,16 @@ def is_relay_verify_comment(event: Mapping[str, Any]) -> bool:
     return get_command_line(event) == VERIFY_COMMAND
 
 
+def is_relay_plan_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay plan."""
+    return get_command_line(event) == PLAN_COMMAND
+
+
+def is_relay_dispatch_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay dispatch."""
+    return get_command_line(event) == DISPATCH_COMMAND
+
+
 def get_issue_number(event: Mapping[str, Any]) -> int:
     """Return the issue number shared by Issue and PR comment threads."""
     issue = event.get("issue")
@@ -250,6 +335,26 @@ def parse_start_options(event: Mapping[str, Any]) -> dict[str, str]:
     return options
 
 
+def parse_plan_options(event: Mapping[str, Any]) -> dict[str, str]:
+    """Parse goal, scope, out_of_scope, and done values from a plan comment."""
+    body = get_comment_body(event) or ""
+    options: dict[str, str] = {}
+    for line in body.splitlines()[1:]:
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        if ":" in stripped_line:
+            key, value = stripped_line.split(":", 1)
+        elif "=" in stripped_line:
+            key, value = stripped_line.split("=", 1)
+        else:
+            continue
+        normalized_key = key.strip().lower().replace("-", "_")
+        if normalized_key in {"goal", "scope", "out_of_scope", "done"}:
+            options[normalized_key] = value.strip()
+    return options
+
+
 def build_start_state(event: Mapping[str, Any]) -> dict[str, Any]:
     """Build the initial WORKING relay state for a /relay start comment."""
     options = parse_start_options(event)
@@ -262,6 +367,18 @@ def build_start_state(event: Mapping[str, Any]) -> dict[str, Any]:
         "next_agent": next_agent,
         "round": DEFAULT_START_STATE["round"],
         "goal": goal,
+    }
+
+
+def build_plan_state(base_state: Mapping[str, Any], event: Mapping[str, Any]) -> dict[str, Any]:
+    """Overlay /relay plan fields onto the current relay state."""
+    options = parse_plan_options(event)
+    return {
+        **dict(base_state),
+        "goal": options.get("goal", base_state.get("goal", "")),
+        "scope": options.get("scope", base_state.get("scope", "")),
+        "out_of_scope": options.get("out_of_scope", base_state.get("out_of_scope", "")),
+        "done": options.get("done", base_state.get("done", "")),
     }
 
 
@@ -354,16 +471,18 @@ def handle_issue_comment_event(
     post_comment: Callable[[str, int, str, str], None] = post_issue_comment,
     list_comments: Callable[[str, int, str], Sequence[Mapping[str, Any]]] = list_issue_comments,
 ) -> bool:
-    """Handle exact /relay status, /relay start, and /relay verify comments.
+    """Handle exact relay command comments.
 
     Returns False for all other comments. AI provider calls, skill loading,
-    `@claude`, and `@codex` automation are intentionally not implemented.
+    and agent-mention automation are intentionally not implemented.
     """
     event = load_github_event(event_path)
     is_status = is_relay_status_comment(event)
     is_start = is_relay_start_comment(event)
     is_verify = is_relay_verify_comment(event)
-    if not is_status and not is_start and not is_verify:
+    is_plan = is_relay_plan_comment(event)
+    is_dispatch = is_relay_dispatch_comment(event)
+    if not is_status and not is_start and not is_verify and not is_plan and not is_dispatch:
         return False
 
     issue_number = get_issue_number(event)
@@ -374,9 +493,19 @@ def handle_issue_comment_event(
 
     comments = list_comments(repository, issue_number, token)
 
+    if is_plan:
+        state = build_plan_state(resolve_relay_state(repo_root, comments), event)
+        post_comment(repository, issue_number, format_plan_comment(state), token)
+        return True
+
     if is_verify:
         state = resolve_relay_state(repo_root, comments)
         post_comment(repository, issue_number, format_verify_comment(state), token)
+        return True
+
+    if is_dispatch:
+        state = resolve_relay_state(repo_root, comments)
+        post_comment(repository, issue_number, format_dispatch_comment(state), token)
         return True
 
     state = resolve_status_state(repo_root, comments)
