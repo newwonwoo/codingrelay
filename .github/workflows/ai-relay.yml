@@ -1,0 +1,47 @@
+name: AI Relay Harness
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  relay-status:
+    name: Reply to relay status comments
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve checkout target
+        id: checkout-target
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const defaultRepository = `${context.repo.owner}/${context.repo.repo}`;
+            core.setOutput("repository", defaultRepository);
+            core.setOutput("ref", context.sha);
+
+            if (!context.payload.issue?.pull_request) {
+              return;
+            }
+
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number,
+            });
+            core.setOutput("repository", pull.head.repo.full_name);
+            core.setOutput("ref", pull.head.sha);
+
+      - name: Checkout status source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.checkout-target.outputs.repository }}
+          ref: ${{ steps.checkout-target.outputs.ref }}
+
+      - name: Handle /relay status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python .github/scripts/ai_relay_harness.py
