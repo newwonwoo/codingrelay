@@ -24,3 +24,8 @@
 - Problem: Local validation can pass while live GitHub Actions dispatch remains unverified when the container has no `gh` CLI, no authenticated GitHub API context, and no configured remote.
 - Future Symptom: The harness may appear ready locally, but the repository owner may still not see a Run workflow button or may see a GitHub-only workflow validation error.
 - Fix: Push the branch to GitHub, run the PR check or `workflow_dispatch` from the GitHub UI/API, and record the live run result in `AI_EVIDENCE.md`.
+
+### Risk 4
+- Problem: `/relay dispatch` relies on the latest hidden state comment and line-oriented `/relay plan` fields.
+- Future Symptom: Dispatch may use stale or incomplete plan text if comments are reordered, truncated, or users provide multi-line plan values.
+- Fix: Add explicit plan IDs or structured blocks if the command format grows beyond MVP single-line fields.

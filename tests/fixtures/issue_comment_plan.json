@@ -1,0 +1,8 @@
+{
+  "issue": {
+    "number": 42
+  },
+  "comment": {
+    "body": "/relay plan\ngoal: local relay validation\nscope: dry-run fixture tests\nout_of_scope: provider calls, skill loading\ndone: local verify prompt generated"
+  }
+}

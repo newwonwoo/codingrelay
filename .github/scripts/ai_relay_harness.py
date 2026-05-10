@@ -12,9 +12,12 @@ from urllib import parse, request
 
 STATUS_COMMAND = "/relay status"
 START_COMMAND = "/relay start"
+HANDOFF_COMMAND = "/relay handoff"
+PLAN_COMMAND = "/relay plan"
 VERIFY_COMMAND = "/relay verify"
 STATE_FILE = "AI_RELAY_STATE.json"
 STATE_COMMENT_MARKER = "AI_RELAY_STATE"
+PLAN_COMMENT_MARKER = "AI_RELAY_PLAN"
 
 DEFAULT_RELAY_STATE: dict[str, Any] = {
     "status": "READY",
@@ -30,6 +33,13 @@ DEFAULT_START_STATE: dict[str, Any] = {
     "next_agent": "codex",
     "round": 0,
     "goal": "",
+}
+
+PLAN_DEFAULTS: dict[str, str] = {
+    "goal": "",
+    "scope": "",
+    "out_of_scope": "",
+    "done": "",
 }
 
 
@@ -52,6 +62,13 @@ def load_relay_state(repo_root: Path | str) -> dict[str, Any]:
 def merge_status_state(state: Mapping[str, Any]) -> dict[str, Any]:
     """Merge a stored relay state with status-display defaults."""
     return {**DEFAULT_RELAY_STATE, **state}
+
+
+def merge_plan(plan: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Merge a stored relay plan with plan-display defaults."""
+    if plan is None:
+        return dict(PLAN_DEFAULTS)
+    return {**PLAN_DEFAULTS, **dict(plan)}
 
 
 def format_status_value(value: Any) -> str:
@@ -90,32 +107,65 @@ def format_start_response(state: Mapping[str, Any]) -> str:
     )
 
 
-def format_verify_prompt(state: Mapping[str, Any]) -> str:
+def format_handoff_response(previous_agent: str, state: Mapping[str, Any]) -> str:
+    """Format the human-readable relay handoff response body."""
+    return "\n".join(
+        [
+            "[AI Relay Handoff]",
+            f"status: {state['status']}",
+            f"previous_agent: {previous_agent}",
+            f"current_agent: {state['current_agent']}",
+            f"next_agent: {state['next_agent']}",
+            f"round: {state['round']}",
+            f"goal: {state.get('goal', '')}",
+        ]
+    )
+
+
+def format_plan_response(plan: Mapping[str, Any]) -> str:
+    """Format the human-readable relay plan response body."""
+    merged_plan = merge_plan(plan)
+    return "\n".join(
+        [
+            "[AI Relay Plan]",
+            f"goal: {merged_plan['goal']}",
+            f"scope: {merged_plan['scope']}",
+            f"out_of_scope: {merged_plan['out_of_scope']}",
+            f"done: {merged_plan['done']}",
+        ]
+    )
+
+
+def format_verify_prompt(state: Mapping[str, Any], plan: Mapping[str, Any] | None = None) -> str:
     """Build a self-verification prompt without calling an AI provider."""
-    goal = state.get("goal", "")
-    scope = state.get("scope", "")
-    out_of_scope = state.get("out_of_scope", "")
-    done = state.get("done", "")
+    merged_plan = merge_plan(plan)
     return "\n".join(
         [
             "Self-verification prompt:",
             "You are the current relay agent. Verify your own completed work before handoff.",
-            f"Goal: {goal}",
-            f"Scope: {scope}",
-            f"Out of scope: {out_of_scope}",
-            f"Done condition: {done}",
+            f"Goal: {merged_plan['goal']}",
+            f"Scope: {merged_plan['scope']}",
+            f"Out of scope: {merged_plan['out_of_scope']}",
+            f"Done condition: {merged_plan['done']}",
             "Check:",
             "1. Confirm the implementation satisfies the goal and done condition.",
             "2. Confirm no out-of-scope AI calls, skill loading, or unrelated automation were added.",
             "3. Run relevant tests or explain any environment limitation.",
             "4. Report PASS or BLOCK with concise evidence and remaining risks.",
+            "",
+            "Relay state:",
+            f"status: {state.get('status', '')}",
+            f"current_agent: {state.get('current_agent', '')}",
+            f"next_agent: {state.get('next_agent', '')}",
+            f"round: {state.get('round', '')}",
         ]
     )
 
 
-def format_verify_response(state: Mapping[str, Any]) -> str:
+def format_verify_response(state: Mapping[str, Any], plan: Mapping[str, Any] | None = None) -> str:
     """Format the human-readable relay verify response body."""
     merged_state = merge_status_state(state)
+    merged_plan = merge_plan(plan)
     return "\n".join(
         [
             "[AI Relay Verify]",
@@ -123,17 +173,27 @@ def format_verify_response(state: Mapping[str, Any]) -> str:
             f"current_agent: {merged_state['current_agent']}",
             f"next_agent: {merged_state['next_agent']}",
             f"round: {merged_state['round']}",
-            f"goal: {state.get('goal', '')}",
+            f"goal: {merged_plan['goal']}",
             "",
-            format_verify_prompt(state),
+            format_verify_prompt(merged_state, merged_plan),
         ]
     )
 
 
+def format_hidden_json_comment(marker: str, payload: Mapping[str, Any]) -> str:
+    """Serialize a hidden GitHub comment JSON block."""
+    payload_json = json.dumps(dict(payload), ensure_ascii=False, indent=2)
+    return f"<!-- {marker}\n{payload_json}\n-->"
+
+
 def format_hidden_state_comment(state: Mapping[str, Any]) -> str:
     """Serialize relay state into a hidden GitHub comment block."""
-    state_json = json.dumps(dict(state), ensure_ascii=False, indent=2)
-    return f"<!-- {STATE_COMMENT_MARKER}\n{state_json}\n-->"
+    return format_hidden_json_comment(STATE_COMMENT_MARKER, state)
+
+
+def format_hidden_plan_comment(plan: Mapping[str, Any]) -> str:
+    """Serialize relay plan into a hidden GitHub comment block."""
+    return format_hidden_json_comment(PLAN_COMMENT_MARKER, plan)
 
 
 def format_start_comment(state: Mapping[str, Any]) -> str:
@@ -141,14 +201,24 @@ def format_start_comment(state: Mapping[str, Any]) -> str:
     return f"{format_hidden_state_comment(state)}\n\n{format_start_response(state)}"
 
 
-def format_verify_comment(state: Mapping[str, Any]) -> str:
+def format_handoff_comment(previous_agent: str, state: Mapping[str, Any]) -> str:
+    """Format the combined hidden state and visible handoff response comment."""
+    return f"{format_hidden_state_comment(state)}\n\n{format_handoff_response(previous_agent, state)}"
+
+
+def format_plan_comment(plan: Mapping[str, Any]) -> str:
+    """Format the combined hidden plan and visible plan response comment."""
+    return f"{format_hidden_plan_comment(plan)}\n\n{format_plan_response(plan)}"
+
+
+def format_verify_comment(state: Mapping[str, Any], plan: Mapping[str, Any] | None = None) -> str:
     """Format the combined hidden state and visible verify response comment."""
-    return f"{format_hidden_state_comment(state)}\n\n{format_verify_response(state)}"
+    return f"{format_hidden_state_comment(state)}\n\n{format_verify_response(state, plan)}"
 
 
-def extract_hidden_state(comment_body: str) -> dict[str, Any] | None:
-    """Extract a hidden relay state JSON object from a comment body."""
-    start_marker = f"<!-- {STATE_COMMENT_MARKER}"
+def extract_hidden_json(comment_body: str, marker: str) -> dict[str, Any] | None:
+    """Extract a hidden JSON object from a comment body for the requested marker."""
+    start_marker = f"<!-- {marker}"
     start_index = comment_body.find(start_marker)
     if start_index == -1:
         return None
@@ -158,26 +228,49 @@ def extract_hidden_state(comment_body: str) -> dict[str, Any] | None:
     if end_index == -1:
         return None
 
-    raw_state = comment_body[json_start:end_index].strip()
+    raw_payload = comment_body[json_start:end_index].strip()
     try:
-        state = json.loads(raw_state)
+        payload = json.loads(raw_payload)
     except json.JSONDecodeError:
         return None
-    if not isinstance(state, dict):
+    if not isinstance(payload, dict):
         return None
-    return state
+    return payload
 
 
-def latest_hidden_state(comments: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
-    """Return the newest hidden relay state from issue comments, if present."""
+def extract_hidden_state(comment_body: str) -> dict[str, Any] | None:
+    """Extract a hidden relay state JSON object from a comment body."""
+    return extract_hidden_json(comment_body, STATE_COMMENT_MARKER)
+
+
+def extract_hidden_plan(comment_body: str) -> dict[str, Any] | None:
+    """Extract a hidden relay plan JSON object from a comment body."""
+    return extract_hidden_json(comment_body, PLAN_COMMENT_MARKER)
+
+
+def latest_hidden_payload(
+    comments: Sequence[Mapping[str, Any]],
+    extractor: Callable[[str], dict[str, Any] | None],
+) -> dict[str, Any] | None:
+    """Return the newest hidden payload from issue comments, if present."""
     for comment in reversed(comments):
         body = comment.get("body")
         if not isinstance(body, str):
             continue
-        state = extract_hidden_state(body)
-        if state is not None:
-            return state
+        payload = extractor(body)
+        if payload is not None:
+            return payload
     return None
+
+
+def latest_hidden_state(comments: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Return the newest hidden relay state from issue comments, if present."""
+    return latest_hidden_payload(comments, extract_hidden_state)
+
+
+def latest_hidden_plan(comments: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Return the newest hidden relay plan from issue comments, if present."""
+    return latest_hidden_payload(comments, extract_hidden_plan)
 
 
 def load_github_event(event_path: Path | str) -> dict[str, Any]:
@@ -186,6 +279,14 @@ def load_github_event(event_path: Path | str) -> dict[str, Any]:
     if not isinstance(event, dict):
         raise RelayHarnessError("GitHub event payload must contain a JSON object.")
     return event
+
+
+def load_comments_file(comments_path: Path | str) -> list[Mapping[str, Any]]:
+    """Load a local fixture containing GitHub issue comments."""
+    raw_comments = json.loads(Path(comments_path).read_text(encoding="utf-8"))
+    if not isinstance(raw_comments, list):
+        raise RelayHarnessError("Comments fixture must contain a JSON list.")
+    return [comment for comment in raw_comments if isinstance(comment, Mapping)]
 
 
 def get_comment_body(event: Mapping[str, Any]) -> str | None:
@@ -217,6 +318,16 @@ def is_relay_start_comment(event: Mapping[str, Any]) -> bool:
     return get_command_line(event) == START_COMMAND
 
 
+def is_relay_handoff_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay handoff."""
+    return get_command_line(event) == HANDOFF_COMMAND
+
+
+def is_relay_plan_comment(event: Mapping[str, Any]) -> bool:
+    """Return True when the first comment line exactly matches /relay plan."""
+    return get_command_line(event) == PLAN_COMMAND
+
+
 def is_relay_verify_comment(event: Mapping[str, Any]) -> bool:
     """Return True when the first comment line exactly matches /relay verify."""
     return get_command_line(event) == VERIFY_COMMAND
@@ -230,8 +341,14 @@ def get_issue_number(event: Mapping[str, Any]) -> int:
     return int(issue["number"])
 
 
-def parse_start_options(event: Mapping[str, Any]) -> dict[str, str]:
-    """Parse start_agent, next_agent, and goal values from a start comment."""
+def is_pull_request_comment_event(event: Mapping[str, Any]) -> bool:
+    """Return True when an issue_comment payload belongs to a pull request thread."""
+    issue = event.get("issue")
+    return isinstance(issue, Mapping) and isinstance(issue.get("pull_request"), Mapping)
+
+
+def parse_key_value_options(event: Mapping[str, Any], allowed_keys: set[str]) -> dict[str, str]:
+    """Parse simple key/value options from relay comments after the command line."""
     body = get_comment_body(event) or ""
     options: dict[str, str] = {}
     for line in body.splitlines()[1:]:
@@ -245,9 +362,19 @@ def parse_start_options(event: Mapping[str, Any]) -> dict[str, str]:
         else:
             continue
         normalized_key = key.strip().lower().replace("-", "_")
-        if normalized_key in {"start_agent", "current_agent", "next_agent", "goal"}:
+        if normalized_key in allowed_keys:
             options[normalized_key] = value.strip()
     return options
+
+
+def parse_start_options(event: Mapping[str, Any]) -> dict[str, str]:
+    """Parse start_agent, next_agent, and goal values from a start comment."""
+    return parse_key_value_options(event, {"start_agent", "current_agent", "next_agent", "goal"})
+
+
+def parse_plan_options(event: Mapping[str, Any]) -> dict[str, str]:
+    """Parse goal, scope, out_of_scope, and done values from a plan comment."""
+    return parse_key_value_options(event, {"goal", "scope", "out_of_scope", "done"})
 
 
 def build_start_state(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -262,6 +389,34 @@ def build_start_state(event: Mapping[str, Any]) -> dict[str, Any]:
         "next_agent": next_agent,
         "round": DEFAULT_START_STATE["round"],
         "goal": goal,
+    }
+
+
+def build_handoff_state(base_state: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Swap current/next agents and increment the relay round."""
+    merged_state = merge_status_state(base_state)
+    previous_agent = str(merged_state["current_agent"])
+    try:
+        next_round = int(merged_state["round"]) + 1
+    except (TypeError, ValueError):
+        next_round = 1
+    return previous_agent, {
+        **dict(merged_state),
+        "status": "WORKING",
+        "current_agent": merged_state["next_agent"],
+        "next_agent": merged_state["current_agent"],
+        "round": next_round,
+    }
+
+
+def build_plan(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a relay plan from a /relay plan comment."""
+    options = parse_plan_options(event)
+    return {
+        "goal": options.get("goal", ""),
+        "scope": options.get("scope", ""),
+        "out_of_scope": options.get("out_of_scope", ""),
+        "done": options.get("done", ""),
     }
 
 
@@ -296,7 +451,7 @@ def list_issue_comments(
     token: str,
     api_url: str = "https://api.github.com",
 ) -> list[Mapping[str, Any]]:
-    """List Issue/PR thread comments so the latest hidden relay state can be read."""
+    """List Issue/PR thread comments so the latest hidden relay payloads can be read."""
     comments: list[Mapping[str, Any]] = []
     page = 1
     while True:
@@ -346,6 +501,11 @@ def resolve_relay_state(
     return load_relay_state(repo_root)
 
 
+def resolve_relay_plan(comments: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Resolve raw relay plan from hidden comments, or return an empty plan."""
+    return merge_plan(latest_hidden_plan(comments))
+
+
 def handle_issue_comment_event(
     repo_root: Path | str,
     event_path: Path | str,
@@ -354,16 +514,19 @@ def handle_issue_comment_event(
     post_comment: Callable[[str, int, str, str], None] = post_issue_comment,
     list_comments: Callable[[str, int, str], Sequence[Mapping[str, Any]]] = list_issue_comments,
 ) -> bool:
-    """Handle exact /relay status, /relay start, and /relay verify comments.
+    """Handle exact relay command comments.
 
     Returns False for all other comments. AI provider calls, skill loading,
-    `@claude`, and `@codex` automation are intentionally not implemented.
+    agent-mention automation, and dispatch automation are intentionally not
+    implemented.
     """
     event = load_github_event(event_path)
     is_status = is_relay_status_comment(event)
     is_start = is_relay_start_comment(event)
+    is_handoff = is_relay_handoff_comment(event)
+    is_plan = is_relay_plan_comment(event)
     is_verify = is_relay_verify_comment(event)
-    if not is_status and not is_start and not is_verify:
+    if not is_status and not is_start and not is_handoff and not is_plan and not is_verify:
         return False
 
     issue_number = get_issue_number(event)
@@ -374,14 +537,54 @@ def handle_issue_comment_event(
 
     comments = list_comments(repository, issue_number, token)
 
+    if is_handoff:
+        previous_agent, state = build_handoff_state(resolve_relay_state(repo_root, comments))
+        post_comment(repository, issue_number, format_handoff_comment(previous_agent, state), token)
+        return True
+
+    if is_plan:
+        plan = build_plan(event)
+        post_comment(repository, issue_number, format_plan_comment(plan), token)
+        return True
+
     if is_verify:
         state = resolve_relay_state(repo_root, comments)
-        post_comment(repository, issue_number, format_verify_comment(state), token)
+        plan = resolve_relay_plan(comments)
+        post_comment(repository, issue_number, format_verify_comment(state, plan), token)
         return True
 
     state = resolve_status_state(repo_root, comments)
     post_comment(repository, issue_number, format_status_response(state), token)
     return True
+
+
+def make_dry_run_post_comment(summary_path: Path | None = None) -> Callable[[str, int, str, str], None]:
+    """Build a post_comment function that prints instead of calling GitHub."""
+
+    def dry_run_post_comment(repository: str, issue_number: int, body: str, token: str) -> None:
+        output = "\n".join(
+            [
+                "[AI Relay Dry Run]",
+                f"repository: {repository}",
+                f"issue_number: {issue_number}",
+                "comment_body:",
+                body,
+            ]
+        )
+        print(output)
+        if summary_path is not None:
+            summary_path.write_text(output + "\n", encoding="utf-8")
+
+    return dry_run_post_comment
+
+
+def make_fixture_list_comments(comments: Sequence[Mapping[str, Any]]) -> Callable[[str, int, str], Sequence[Mapping[str, Any]]]:
+    """Build a list_comments function backed by local fixture data."""
+
+    def fixture_list_comments(repository: str, issue_number: int, token: str) -> Sequence[Mapping[str, Any]]:
+        return comments
+
+    return fixture_list_comments
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -402,13 +605,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--repository",
-        default=os.environ.get("GITHUB_REPOSITORY"),
-        help="GitHub owner/repo. Defaults to GITHUB_REPOSITORY.",
+        default=os.environ.get("GITHUB_REPOSITORY", "dry-run/repo"),
+        help="GitHub owner/repo. Defaults to GITHUB_REPOSITORY, or dry-run/repo in dry-run mode.",
     )
     parser.add_argument(
         "--token",
         default=os.environ.get("GITHUB_TOKEN"),
         help="GitHub token used to post relay comments. Defaults to GITHUB_TOKEN.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the comment that would be posted instead of calling the GitHub API.",
+    )
+    parser.add_argument(
+        "--comments-path",
+        type=Path,
+        help="Optional JSON fixture containing existing issue comments for dry-run/local simulation.",
+    )
+    parser.add_argument(
+        "--summary",
+        type=Path,
+        help="Optional path to write the dry-run comment body summary.",
     )
     args = parser.parse_args(argv)
 
@@ -417,10 +635,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise RelayHarnessError("GITHUB_EVENT_PATH is required.")
         if not args.repository:
             raise RelayHarnessError("GITHUB_REPOSITORY is required.")
-        if not args.token:
-            raise RelayHarnessError("GITHUB_TOKEN is required.")
+        if not args.dry_run and not args.token:
+            raise RelayHarnessError("GITHUB_TOKEN is required unless --dry-run is used.")
 
-        posted = handle_issue_comment_event(args.repo_root, args.event_path, args.repository, args.token)
+        post_comment = post_issue_comment
+        list_comments: Callable[[str, int, str], Sequence[Mapping[str, Any]]] = list_issue_comments
+        token = args.token or ""
+        if args.dry_run:
+            post_comment = make_dry_run_post_comment(args.summary)
+            comments = load_comments_file(args.comments_path) if args.comments_path else []
+            list_comments = make_fixture_list_comments(comments)
+
+        posted = handle_issue_comment_event(
+            args.repo_root,
+            args.event_path,
+            args.repository,
+            token,
+            post_comment=post_comment,
+            list_comments=list_comments,
+        )
     except (OSError, json.JSONDecodeError, RelayHarnessError) as exc:
         print(str(exc))
         return 1
