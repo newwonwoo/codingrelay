@@ -118,6 +118,25 @@
   `<!-- AI_RELAY_PLAN`) without a migration path; old comments must remain
   parseable.
 
+## Stage 8 Addendum (Risks 12-14 landed, self-audit recursion)
+
+- Applied orchestrator §13.2 six-month-failure prompt to every line
+  changed in Stages 6-7 (373 diff lines) across 8 axes.
+- Fixed 3 localized findings in-round:
+  - Risk 12: `kakao_notify` now uses `timeout=10` on urlopen.
+  - Risk 13: `github_api_request` honors `Retry-After` header,
+    `max(configured, header)` so shorter server hints never shrink our
+    own backoff.
+  - Risk 14: `github_api_request` retries 403 when
+    `x-ratelimit-remaining: 0` (GitHub secondary rate limit); other
+    403s remain non-retryable.
+- Documented but not fixed (known limitations):
+  - Mismatched fence markers can fool `extract_hidden_json` (edge case).
+  - Non-idempotent POST retry can duplicate comments (GitHub
+    idempotency-key would fix, out of V1 scope).
+  - `task_id` not carried across DONE→force restart.
+- Test count: 90 passing (85 + 5 new for Risks 12-14).
+
 ## Stage 7 Addendum (Risk 11 landed)
 
 - `kakao_notify` now wraps both the injectable `sender` path and the

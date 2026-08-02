@@ -64,3 +64,18 @@
 - Problem: When the kakao webhook was configured but unreachable, `kakao_notify` raised on `urlopen` and bubbled up to `main()`. Since the HUMAN_REQUIRED short-circuit calls `kakao_notify` *after* posting the GitHub comment, the relay state was preserved, but the workflow run still ended red.
 - Future Symptom: A team monitoring red workflow runs would have gotten a false positive every time the kakao host had a hiccup, even though the relay state was successfully persisted on GitHub.
 - Fix (Stage 7 — landed): `kakao_notify` now wraps both the injectable `sender` path and the real `urlopen` path in a try/except that catches `HTTPError`, `URLError`, `OSError`, and any unexpected exception. Failures are logged to stderr with an `[AI Relay] kakao_notify ...` prefix and the function returns `False`. Callers (HUMAN_REQUIRED branch in `handle_issue_comment_event`) are unaffected because they already ignored the return value. Regression tests assert: silent skip without webhook, success on injected sender, return-False + stderr log on URLError, return-False + stderr log on RuntimeError, and end-to-end HUMAN_REQUIRED path still returns True with a posted comment when the real `urlopen` raises URLError.
+
+### Risk 12
+- Problem: `kakao_notify` called `request.urlopen` with no `timeout` kwarg. Default socket timeout is `None`, so if the webhook host TCP-accepted but never returned a response, the call hung indefinitely and the whole workflow job blocked until GitHub Actions killed it (6h default).
+- Future Symptom: A slow-loris or half-open kakao host would silently consume the entire Actions minutes budget on every relay event.
+- Fix (Stage 8 — landed): `kakao_notify` passes `timeout=10` to `request.urlopen`. Regression test injects a fake urlopen that captures the timeout argument.
+
+### Risk 13
+- Problem: `github_api_request`'s retry logic ignored the `Retry-After` response header. When GitHub returned 429/503 with `Retry-After: 60`, our fixed 2s/4s/8s backoff hammered the API immediately, wasting retries and prolonging outage recovery.
+- Future Symptom: Under GitHub API rate limit throttling, the harness would consume all its retries in ~14s and surface a red workflow even though a 30-60s wait would have succeeded.
+- Fix (Stage 8 — landed): `github_api_request` reads `Retry-After` from `HTTPError.headers`. When present and parseable as a float, it overrides the configured backoff step for that attempt (using `max(configured, retry_after)` so shorter server hints never shrink our own backoff). Regression tests cover both a valid `Retry-After: 17` and a malformed `Retry-After: not-a-number`.
+
+### Risk 14
+- Problem: GitHub returns HTTP 403 (not 429) with `x-ratelimit-remaining: 0` when the caller hits a secondary rate limit. The original retry logic treated all 403s as non-retryable, so a transient secondary rate limit failed the harness immediately.
+- Future Symptom: Bursts of `/relay` commands (e.g. multi-step chained tests) would randomly turn workflow runs red mid-conversation with no evidence of what happened.
+- Fix (Stage 8 — landed): `github_api_request` now treats 403 as retryable when the response header `x-ratelimit-remaining` is `0`; other 403s remain non-retryable. Regression tests cover both paths.

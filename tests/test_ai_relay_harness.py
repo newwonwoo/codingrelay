@@ -1286,6 +1286,187 @@ def test_main_posts_error_comment_when_relay_harness_error_raised(tmp_path: Path
     assert "network exploded" in body
 
 
+def test_github_api_request_retries_on_403_when_secondary_rate_limit_exhausted() -> None:
+    from urllib.error import HTTPError
+    from email.message import Message
+
+    sleeps: list[float] = []
+    attempts = {"count": 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    rate_limit_headers = Message()
+    rate_limit_headers["x-ratelimit-remaining"] = "0"
+
+    def flaky_opener(req):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise HTTPError(
+                url="https://api.github.com/test",
+                code=403,
+                msg="Forbidden",
+                hdrs=rate_limit_headers,
+                fp=None,
+            )
+        return FakeResponse()
+
+    result = ai_relay_harness.github_api_request(
+        "https://api.github.com/test",
+        "tok",
+        backoff=(0.0,),
+        sleeper=lambda s: sleeps.append(s),
+        opener=flaky_opener,
+    )
+    assert result == {"ok": True}
+    assert attempts["count"] == 2
+
+
+def test_github_api_request_403_without_rate_limit_header_is_not_retried() -> None:
+    from urllib.error import HTTPError
+    from email.message import Message
+
+    attempts = {"count": 0}
+
+    def always_forbidden(req):
+        attempts["count"] += 1
+        raise HTTPError(
+            url="https://api.github.com/test",
+            code=403,
+            msg="Forbidden",
+            hdrs=Message(),
+            fp=None,
+        )
+
+    try:
+        ai_relay_harness.github_api_request(
+            "https://api.github.com/test",
+            "tok",
+            backoff=(0.0, 0.0),
+            sleeper=lambda s: None,
+            opener=always_forbidden,
+        )
+    except ai_relay_harness.RelayHarnessError as exc:
+        assert "HTTP 403" in str(exc)
+    else:
+        raise AssertionError("expected RelayHarnessError for non-rate-limit 403")
+    assert attempts["count"] == 1
+
+
+def test_github_api_request_honors_retry_after_header() -> None:
+    from urllib.error import HTTPError
+    from email.message import Message
+
+    sleeps: list[float] = []
+    attempts = {"count": 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    retry_headers = Message()
+    retry_headers["Retry-After"] = "17"
+
+    def flaky_opener(req):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise HTTPError(
+                url="https://api.github.com/test",
+                code=429,
+                msg="Too Many Requests",
+                hdrs=retry_headers,
+                fp=None,
+            )
+        return FakeResponse()
+
+    result = ai_relay_harness.github_api_request(
+        "https://api.github.com/test",
+        "tok",
+        backoff=(1.0,),  # small configured backoff, header says 17
+        sleeper=lambda s: sleeps.append(s),
+        opener=flaky_opener,
+    )
+    assert result == {"ok": True}
+    assert sleeps == [17.0]
+
+
+def test_github_api_request_ignores_malformed_retry_after() -> None:
+    from urllib.error import HTTPError
+    from email.message import Message
+
+    sleeps: list[float] = []
+    attempts = {"count": 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    bad_headers = Message()
+    bad_headers["Retry-After"] = "not-a-number"
+
+    def flaky_opener(req):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise HTTPError(
+                url="https://api.github.com/test",
+                code=503,
+                msg="Service Unavailable",
+                hdrs=bad_headers,
+                fp=None,
+            )
+        return FakeResponse()
+
+    result = ai_relay_harness.github_api_request(
+        "https://api.github.com/test",
+        "tok",
+        backoff=(3.0,),
+        sleeper=lambda s: sleeps.append(s),
+        opener=flaky_opener,
+    )
+    assert result == {"ok": True}
+    assert sleeps == [3.0]  # configured backoff, malformed header ignored
+
+
+def test_kakao_notify_passes_timeout_to_urlopen(monkeypatch) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=None, *_a, **_kw):
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(ai_relay_harness.request, "urlopen", fake_urlopen)
+
+    result = ai_relay_harness.kakao_notify("hi", webhook_url="https://kakao.example/hook")
+    assert result is True
+    assert captured["timeout"] == 10
+
+
 def test_kakao_notify_skips_silently_without_webhook(capsys) -> None:
     sent: list[tuple[str, bytes]] = []
 

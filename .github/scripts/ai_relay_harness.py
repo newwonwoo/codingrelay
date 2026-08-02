@@ -976,8 +976,13 @@ def github_api_request(
 ) -> Any:
     """Call the GitHub API and decode a JSON response with retry/backoff.
 
-    Retries on URLError, HTTPError 5xx, and HTTPError 429. Non-retryable
-    HTTP errors (4xx other than 429) and a final retry exhaustion are
+    Retries on URLError, HTTPError 5xx, HTTPError 429, and HTTPError 403 with
+    an `x-ratelimit-remaining: 0` header (GitHub secondary rate limit). When
+    the response carries a `Retry-After` header, it overrides the configured
+    backoff step for that attempt so we do not immediately hammer the API
+    when GitHub explicitly asked us to wait.
+
+    Non-retryable HTTP errors (other 4xx) and final retry exhaustion are
     re-raised as RelayHarnessError so callers can surface a single visible
     error comment instead of a workflow stack trace.
     """
@@ -1001,6 +1006,7 @@ def github_api_request(
     attempts = len(delays) + 1
     last_error: Exception | None = None
     for attempt_index in range(attempts):
+        override_delay: float | None = None
         try:
             with open_request(github_request) as response:
                 response_body = response.read()
@@ -1009,11 +1015,30 @@ def github_api_request(
             return json.loads(response_body.decode("utf-8"))
         except HTTPError as exc:  # pragma: no cover - network status branches
             last_error = exc
-            retryable = exc.code == 429 or 500 <= exc.code < 600
+            headers = getattr(exc, "headers", None)
+            rate_limit_exhausted = False
+            if headers is not None:
+                try:
+                    remaining = headers.get("x-ratelimit-remaining")
+                    rate_limit_exhausted = remaining is not None and str(remaining).strip() == "0"
+                except Exception:  # noqa: BLE001
+                    rate_limit_exhausted = False
+            retryable = (
+                exc.code == 429
+                or 500 <= exc.code < 600
+                or (exc.code == 403 and rate_limit_exhausted)
+            )
             if not retryable or attempt_index == attempts - 1:
                 raise RelayHarnessError(
                     f"GitHub API {method} {url} failed with HTTP {exc.code}: {exc.reason}"
                 ) from exc
+            if headers is not None:
+                try:
+                    retry_after_raw = headers.get("Retry-After")
+                    if retry_after_raw is not None:
+                        override_delay = float(str(retry_after_raw).strip())
+                except (TypeError, ValueError):
+                    override_delay = None
         except URLError as exc:  # pragma: no cover - network branch
             last_error = exc
             if attempt_index == attempts - 1:
@@ -1021,7 +1046,8 @@ def github_api_request(
                     f"GitHub API {method} {url} failed with network error: {exc.reason}"
                 ) from exc
         if attempt_index < len(delays):
-            sleep(delays[attempt_index])
+            configured = delays[attempt_index]
+            sleep(max(configured, override_delay) if override_delay is not None else configured)
     # Should be unreachable, but keep mypy happy.
     raise RelayHarnessError(f"GitHub API {method} {url} exhausted retries: {last_error}")
 
@@ -1256,7 +1282,7 @@ def kakao_notify(
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-        with request.urlopen(notify_request) as _:
+        with request.urlopen(notify_request, timeout=10) as _:
             pass
         return True
     except (HTTPError, URLError, OSError) as exc:

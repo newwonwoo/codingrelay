@@ -87,6 +87,37 @@
 ### Not Verified
 - Live GitHub comment creation for `/relay plan` or `/relay dispatch` after pushing to GitHub.
 
+## 2026-05-10 Stage 8: Tragic-Failure Audit of Stages 6-7 → Risks 12-14 Landed
+
+### Audit Approach
+Applied orchestrator §13.2 six-month-failure prompt to every line changed in Stages 6-7 (373 diff lines) across 8 axes: hardcoding, missing tests, fragile deps, unclear state transitions, hidden coupling, poor logging, incomplete error handling, doc mismatch.
+
+### Findings
+- **Risk 12**: `kakao_notify` had no urlopen timeout → indefinite hang possible.
+- **Risk 13**: `github_api_request` ignored `Retry-After` → wasted retries under throttling.
+- **Risk 14**: `github_api_request` treated 403 as non-retryable, missing secondary rate limits.
+- Documented but not fixed: `latest_hidden_payload` with mismatched fence markers (Risk H, too edge-case); non-idempotent POST retry can duplicate comments on partial network failure (Risk P, defer to server-side idempotency); `task_id` not carried across DONE→force restart (Risk V, feature-gap).
+
+### Commands Run
+- `python3 -m py_compile .github/scripts/ai_relay_harness.py`
+- `python3 -m pytest -q`
+
+### Results
+- Risk 12: `kakao_notify` now passes `timeout=10` to `request.urlopen`.
+- Risk 13: `github_api_request` honors `Retry-After` when parseable, `max(configured, header)`.
+- Risk 14: `github_api_request` retries 403 when `x-ratelimit-remaining: 0`; other 403s stay non-retryable.
+- Pytest cumulative: 85 → 90. Final run: `90 passed in 0.28s`.
+
+### Failed Tests
+- None.
+
+### Logs
+- `90 passed in 0.28s`
+
+### Not Verified
+- Live GitHub secondary rate limit path (can't induce in test).
+- Live kakao webhook `timeout=10` behavior against real slow host.
+
 ## 2026-05-10 Stage 7: Risk 11 Fix (Kakao Failure Isolation)
 
 ### Commands Run

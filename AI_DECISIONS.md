@@ -18,6 +18,12 @@
 - Reason: The requested boundary is automatic-call-preparation, not actual agent invocation.
 - Consequence: Humans can review/copy the generated dispatch prompt before any later automation step adds live mentions.
 
+## 2026-05-10 — Stage 8: Recursive Six-Month-Failure Audit On Stages 6-7
+
+- Decision: After landing Risks 7-11 fixes, immediately run the orchestrator §13.2 six-month-failure prompt on the Stages 6-7 code itself (373 diff lines) as a self-recursion check. Fix any localized issues in the same round; document architectural ones as new Risks and defer.
+- Reason: A "risks are all closed" state is only meaningful if the fixes themselves have been audited to the same standard. Skipping this check reintroduces the same trust gap that prompted the audit series in the first place.
+- Consequence: Risks 12-14 landed (kakao urlopen timeout, `Retry-After` honored, secondary rate-limit 403 retryable). Risks H/P/V documented in AI_EVIDENCE.md but not fixed — logged as known limitations to revisit if V1 gets extended.
+
 ## 2026-05-10 — Stage 7: Isolate kakao_notify Failures From Workflow Exit Code
 
 - Decision: `kakao_notify` swallows all delivery exceptions and returns `False` instead of propagating. The HUMAN_REQUIRED branch already posts the GitHub comment before calling `kakao_notify`, so isolating the network failure preserves the relay state on GitHub while preventing a red workflow run from a transient kakao outage.
